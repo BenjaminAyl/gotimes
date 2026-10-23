@@ -1,0 +1,99 @@
+{{define "index"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false}'>
+<title>GoTimes</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/CourierPrime-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/PirataOne-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/app.css?v={{.V}}">
+<script src="/static/htmx.min.js?v={{.V}}" defer></script>
+<script src="/static/app.js?v={{.V}}" defer></script>
+</head>
+<body data-view="list">
+{{template "icons"}}
+
+<header class="masthead" id="masthead">
+  <div class="utility">
+    <div class="util-start">
+      <button type="button" class="icon-btn" data-search-toggle aria-label="Search dispatches" title="Search dispatches" aria-expanded="false">{{template "icon" "search"}}</button>
+      <form id="story-search" class="story-search" role="search" hidden>
+        <input type="search" name="q" placeholder="Search dispatches" aria-label="Search dispatches" autocomplete="off" spellcheck="false">
+      </form>
+      <p class="dateline">{{.Today}}</p>
+    </div>
+    <div class="util-end">
+      <button type="button" class="icon-btn" hx-post="/refresh" hx-swap="none" aria-label="Refresh" title="Refresh">{{template "icon" "refresh"}}</button>
+      <button type="button" class="icon-btn" data-open aria-label="Add section" title="Add section">{{template "icon" "plus"}}</button>
+    </div>
+  </div>
+  <h1 class="brand">GoTimes</h1>
+  <nav id="pinbar" class="pinbar" aria-label="Pinned sections"></nav>
+</header>
+
+<div class="shell">
+  <aside class="rail">
+    <nav class="sections" aria-label="Sections">
+      <div class="label label-row">
+        <h2>Sections</h2>
+        <button type="button" class="icon-btn icon-btn-sm" data-sections-search aria-label="Filter sections" title="Filter sections" aria-expanded="false">{{template "icon" "search"}}</button>
+      </div>
+      <input type="search" id="sec-filter" class="sec-filter" placeholder="Filter sections" aria-label="Filter sections" autocomplete="off" spellcheck="false" hidden>
+      <div id="sections" class="scroll" hx-get="/feeds" hx-include="#view"
+           hx-trigger="load, feeds-changed from:body, sections-changed from:body, read-changed from:body, filter-changed from:body"></div>
+    </nav>
+    <section class="stories" aria-label="Dispatches">
+      <h2 class="label">Dispatches</h2>
+      <div id="items" class="scroll" hx-get="/items" hx-include="#view"
+           hx-trigger="load, feeds-changed from:body, filter-changed from:body"></div>
+    </section>
+  </aside>
+
+  <main id="reader" class="reader" aria-live="polite">
+    <div class="empty">
+      <p class="ornament" aria-hidden="true">* * *</p>
+      <p>Select a dispatch to read it here.</p>
+    </div>
+  </main>
+</div>
+
+<!-- Current filter, search and open story; sent along with every list request. -->
+<form id="view" hidden>
+  <input name="feed"><input name="unread"><input name="q"><input name="story">
+</form>
+
+<dialog id="add-dialog" class="sheet" aria-labelledby="add-title">
+  <div class="sheet-body">
+    <h2 id="add-title" class="sheet-title">Add a section</h2>
+    <form id="add-form" class="sheet-form" hx-post="/feeds" hx-target="#add-notice" hx-swap="innerHTML">
+      <div class="field">
+        <label for="add-url">Feed address</label>
+        <input id="add-url" name="url" type="url" required autocomplete="off" spellcheck="false"
+               placeholder="https://example.com/feed.xml">
+        <p class="hint">The web address of an RSS or Atom feed.</p>
+      </div>
+      <div id="add-notice"></div>
+      <div class="sheet-actions">
+        <button type="button" class="link-btn" data-close>Cancel</button>
+        <button type="submit" class="btn btn-solid">Add</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
+</body>
+</html>{{end}}
+
+{{define "icon"}}<svg class="icon" aria-hidden="true" focusable="false"><use href="#i-{{.}}"/></svg>{{end}}
+
+{{define "icons"}}<svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 4.5v15M4.5 12h15"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.4-5.5"/><path d="M19.5 4v4.5H15"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4.5h6l-.8 5.5 2.8 3H7l2.8-3z"/><path d="M12 13v7"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+</svg>{{end}}

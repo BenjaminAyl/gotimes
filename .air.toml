@@ -1,0 +1,8 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/gotimes ./cmd/gotimes"
+  bin = "./tmp/gotimes"
+  include_ext = ["go", "html", "css", "js"]
+  exclude_dir = ["tmp", "data", "bin"]

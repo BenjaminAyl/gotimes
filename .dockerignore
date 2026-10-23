@@ -1,0 +1,7 @@
+.git
+.env
+data
+tmp
+*.md
+compose.yaml
+Dockerfile

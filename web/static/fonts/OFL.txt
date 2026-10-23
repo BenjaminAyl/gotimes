@@ -1,0 +1,5 @@
+Courier Prime (c) Quote-Unquote Apps, and Pirata One (c) Rodrigo Fuenzalida,
+are licensed under the SIL Open Font License, Version 1.1:
+https://openfontlicense.org
+Obtained from Google Fonts (https://fonts.google.com/specimen/Courier+Prime,
+https://fonts.google.com/specimen/Pirata+One).

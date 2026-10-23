@@ -31,3 +31,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Project
+.env
+data/*
+!data/.gitkeep
+tmp/
+bin/

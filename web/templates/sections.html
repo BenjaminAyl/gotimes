@@ -1,0 +1,27 @@
+{{define "sections"}}<ul>
+{{range .Feeds}}  <li class="sec-row" data-name="{{.Name}}">
+    <div class="sec-line">
+      <button type="button" class="sec" data-filter data-feed="{{.ID}}" data-unread=""{{if eq .ID $.View.Feed}} aria-current="true"{{end}}>
+        {{if .Pinned}}<span class="pin-mark">{{template "icon" "pin"}}</span>{{end}}
+        <span class="sec-name">{{.Name}}</span>
+        {{if .Unread}}<span class="count">{{.Unread}}</span>{{end}}
+      </button>
+      <span class="sec-tools">
+        <button type="button" class="icon-btn icon-btn-sm" hx-post="/feeds/{{.ID}}/pin" hx-swap="none"
+                aria-pressed="{{.Pinned}}" aria-label="{{if .Pinned}}Unpin{{else}}Pin{{end}} {{.Name}}" title="{{if .Pinned}}Unpin{{else}}Pin to top{{end}}">{{template "icon" "pin"}}</button>
+        <button type="button" class="icon-btn icon-btn-sm" hx-post="/feeds/{{.ID}}/read" hx-swap="none"
+                aria-label="Mark {{.Name}} read" title="Mark all read">{{template "icon" "check"}}</button>
+        <button type="button" class="icon-btn icon-btn-sm" hx-delete="/feeds/{{.ID}}" hx-swap="none" hx-confirm="Remove this section?"
+                aria-label="Remove {{.Name}}" title="Remove section">{{template "icon" "x"}}</button>
+      </span>
+    </div>
+    {{with .LastError}}<p class="sec-error">Couldn’t update: {{.}}</p>{{end}}
+  </li>
+{{else}}  <li><p class="quiet">No sections yet. Use + to add a feed.</p></li>
+{{end}}</ul>
+<nav id="pinbar" class="pinbar" aria-label="Pinned sections" hx-swap-oob="true">
+  <button type="button" class="pin-tab" data-filter data-feed="" data-unread=""{{if and (not .View.Feed) (not .View.Unread)}} aria-current="true"{{end}}>All</button>
+  <button type="button" class="pin-tab" data-filter data-feed="" data-unread="1"{{if and .View.Unread (not .View.Feed)}} aria-current="true"{{end}}>Unread{{if .TotalUnread}} <span class="count">{{.TotalUnread}}</span>{{end}}</button>
+{{if .AnyPinned}}  <span class="pin-sep" aria-hidden="true"></span>
+{{end}}{{range .Feeds}}{{if .Pinned}}  <button type="button" class="pin-tab" data-filter data-feed="{{.ID}}" data-unread=""{{if eq .ID $.View.Feed}} aria-current="true"{{end}}>{{.Name}}{{if .Unread}} <span class="count">{{.Unread}}</span>{{end}}</button>
+{{end}}{{end}}</nav>{{end}}
