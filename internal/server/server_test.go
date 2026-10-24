@@ -212,22 +212,22 @@ func TestCategories(t *testing.T) {
 	h := newTestServer(t, "me@example.com")
 	hdr := map[string]string{clientHeader: "test"}
 
-	if w := do(h, "GET", "/api/icons", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"crescent"`) {
+	if w := do(h, "GET", "/api/icons", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"1"`) {
 		t.Fatalf("icons = %d %s", w.Code, w.Body)
 	}
 	if w := do(h, "POST", "/api/categories", `{"name":"News","icon":"nope"}`, hdr); w.Code != 400 {
 		t.Fatalf("unknown icon = %d", w.Code)
 	}
-	if w := do(h, "POST", "/api/categories", `{"name":"  ","icon":"crescent"}`, hdr); w.Code != 400 {
+	if w := do(h, "POST", "/api/categories", `{"name":"  ","icon":"1"}`, hdr); w.Code != 400 {
 		t.Fatalf("blank name = %d", w.Code)
 	}
-	w := do(h, "POST", "/api/categories", `{"name":"News","icon":"crescent"}`, hdr)
+	w := do(h, "POST", "/api/categories", `{"name":"News","icon":"1"}`, hdr)
 	var created struct{ ID int64 }
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || w.Code != 201 || created.ID == 0 {
 		t.Fatalf("create = %d %s", w.Code, w.Body)
 	}
 	cat := itoa(created.ID)
-	if w := do(h, "POST", "/api/categories", `{"name":"News","icon":"eye"}`, hdr); w.Code != 409 {
+	if w := do(h, "POST", "/api/categories", `{"name":"News","icon":"2"}`, hdr); w.Code != 409 {
 		t.Fatalf("duplicate = %d", w.Code)
 	}
 
@@ -247,7 +247,7 @@ func TestCategories(t *testing.T) {
 	}
 	w = do(h, "GET", "/api/feeds", "", nil)
 	if err := json.Unmarshal(w.Body.Bytes(), &fl); err != nil || len(fl.Categories) != 1 ||
-		fl.Feeds[0].Category != created.ID || fl.Categories[0].Icon != "crescent" {
+		fl.Feeds[0].Category != created.ID || fl.Categories[0].Icon != "1" {
 		t.Fatalf("feeds = %s (%v)", w.Body, err)
 	}
 	if w := do(h, "GET", "/api/items?category="+cat, "", nil); !strings.Contains(w.Body.String(), `"Hello"`) {
@@ -260,10 +260,10 @@ func TestCategories(t *testing.T) {
 	if w := do(h, "POST", "/api/categories/"+cat+"/pin", "", hdr); w.Code != 204 {
 		t.Fatalf("pin = %d", w.Code)
 	}
-	if w := do(h, "PATCH", "/api/categories/"+cat, `{"name":"Daily","icon":"eye"}`, hdr); w.Code != 204 {
+	if w := do(h, "PATCH", "/api/categories/"+cat, `{"name":"Daily","icon":"2"}`, hdr); w.Code != 204 {
 		t.Fatalf("rename = %d", w.Code)
 	}
-	if w := do(h, "GET", "/api/feeds", "", nil); !strings.Contains(w.Body.String(), `"name":"Daily","icon":"eye","pinned":true`) {
+	if w := do(h, "GET", "/api/feeds", "", nil); !strings.Contains(w.Body.String(), `"name":"Daily","icon":"2","pinned":true`) {
 		t.Fatalf("after edit = %s", w.Body)
 	}
 

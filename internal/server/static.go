@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -38,6 +39,15 @@ func newFrontend(webFS fs.FS) (*frontend, error) {
 			icons = append(icons, name)
 		}
 	}
+	// numbered icons (1.svg, 2.svg, ...) sort by number, not as text ("10" after "9")
+	slices.SortFunc(icons, func(a, b string) int {
+		na, errA := strconv.Atoi(a)
+		nb, errB := strconv.Atoi(b)
+		if errA == nil && errB == nil && na != nb {
+			return na - nb
+		}
+		return strings.Compare(a, b)
+	})
 	return &frontend{
 		index:  bytes.ReplaceAll(index, []byte("__V__"), []byte(v)),
 		assets: http.FileServerFS(webFS),
