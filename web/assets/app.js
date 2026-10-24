@@ -247,7 +247,28 @@ function renderItems(items) {
     listEl.replaceChildren(span("note", state.q ? "Nothing matches." : state.tab === "unread" ? "All read." : "Nothing here."));
     return;
   }
-  listEl.replaceChildren(...items.map(rowFor));
+  const view = state.tab + "|" + state.q;
+  const had = view === shownView ? shownIds : null;
+  shownView = view;
+  shownIds = new Set(items.map((i) => i.id));
+  const rows = items.map(rowFor);
+  listEl.replaceChildren(...rows);
+  if (had?.size && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    rows.filter((r) => !had.has(Number(r.dataset.id))).forEach(slideIn);
+  }
+}
+
+// What the list showed last, so only rows that just arrived animate.
+let shownView = "";
+let shownIds = new Set();
+
+// Grow a new row from nothing so the rows below glide down to make room.
+function slideIn(row) {
+  const h = row.offsetHeight;
+  row.animate(
+    [{ height: "0px", opacity: 0, overflow: "hidden" }, { height: h + "px", opacity: 1, overflow: "hidden" }],
+    { duration: 350, easing: "cubic-bezier(.2,.7,.2,1)" },
+  );
 }
 
 const matches = (it, q) =>
@@ -789,6 +810,21 @@ document.addEventListener("keydown", (e) => {
   if (!next) return;
   openItem(next.id);
   listEl.querySelector(`[data-id="${next.id}"]`)?.scrollIntoView({ block: "nearest" });
+});
+
+// ---------- polling ----------
+
+// Pick up new items while the tab is open: every few minutes, and on return.
+const POLL_MS = 3 * 60 * 1000;
+let lastPoll = Date.now();
+function poll() {
+  if (document.hidden || refreshBtn.classList.contains("busy")) return;
+  lastPoll = Date.now();
+  loadFeeds().then(show).catch(() => {});
+}
+setInterval(poll, POLL_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && Date.now() - lastPoll > 30000) poll();
 });
 
 // ---------- start ----------
