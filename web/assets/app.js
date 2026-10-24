@@ -6,11 +6,14 @@ const tabsEl = $("tabs");
 const listEl = $("list");
 const viewerEl = $("viewer");
 const filterEl = $("filter");
+const pinsEl = $("pins");
+const ASSET_V = document.querySelector('meta[name="asset-v"]').content;
 
 const state = {
   feeds: [],
+  categories: [],
   totalUnread: 0,
-  tab: "unread", // "unread" | "all" | "feeds" | "feed:<id>"
+  tab: "unread", // "unread" | "all" | "feeds" | "feed:<id>" | "cat:<id>"
   q: "",
   items: [], // what the list currently shows
   current: 0, // open item id
@@ -73,6 +76,7 @@ function listQuery(tab, q) {
   const p = new URLSearchParams();
   if (tab === "unread") p.set("unread", "1");
   if (tab.startsWith("feed:")) p.set("feed", tab.slice(5));
+  if (tab.startsWith("cat:")) p.set("category", tab.slice(4));
   if (q) p.set("q", q);
   return p.toString();
 }
@@ -97,6 +101,7 @@ function fetchArticle(id) {
 async function loadFeeds() {
   const data = await api("GET", "/feeds");
   state.feeds = data.feeds;
+  state.categories = data.categories;
   state.totalUnread = data.total_unread;
   renderTabs();
   if (state.tab === "feeds") renderFeeds();
@@ -110,6 +115,7 @@ const prefetchArticle = (id) => { if (!articles.has(id)) fetchArticle(id).catch(
 
 function warmLists() {
   const queries = [listQuery("unread", ""), listQuery("all", "")];
+  state.categories.forEach((c) => queries.push(listQuery("cat:" + c.id, "")));
   state.feeds.slice(0, 20).forEach((f) => queries.push(listQuery("feed:" + f.id, "")));
   queries.forEach((q, i) => idle(() => prefetchList(q), 150 * i));
 }
@@ -129,37 +135,74 @@ function intent(e) {
 
 // ---------- tabs ----------
 
-function tabButton(id, label, extra, icon) {
+function tabButton(id, label, extra) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "tab";
   b.dataset.tab = id;
   b.setAttribute("role", "tab");
   b.setAttribute("aria-selected", String(state.tab === id));
-  if (icon) b.append(icon);
   b.append(label);
   if (extra) b.append(extra);
   return b;
 }
 
+const catUnread = (id) => state.feeds.reduce((n, f) => n + (f.category_id === id ? f.unread : 0), 0);
+const catOf = (id) => state.categories.find((c) => c.id === id);
+
+// A category's icon (an SVG from /assets/icons, tinted to the text colour), or its first letter.
+function catIcon(c) {
+  if (!c.icon) return letterIcon(c.name);
+  const el = span("cat-icon", "");
+  el.style.setProperty("--icon", `url("/assets/icons/${encodeURIComponent(c.icon)}.svg?v=${ASSET_V}")`);
+  el.setAttribute("aria-hidden", "true");
+  return el;
+}
+
+// The main views, plus a row of icons for pinned categories and feeds, and for
+// whatever feed or category is open if it isn't pinned.
 function renderTabs() {
-  const tabs = [];
-  tabs.push(tabButton("unread", "Unread", state.totalUnread ? span("n", state.totalUnread) : null));
-  tabs.push(tabButton("all", "All"));
-  const pinned = state.feeds.filter((f) => f.pinned);
-  for (const f of pinned) tabs.push(tabButton("feed:" + f.id, feedName(f), f.unread ? span("n", f.unread) : null, feedIcon(f.id)));
-  // a feed opened from the Feeds tab gets a temporary tab so you can close it again
-  if (state.tab.startsWith("feed:")) {
-    const f = feedOf(Number(state.tab.slice(5)));
-    if (f && !f.pinned) {
-      const x = span("x", "×");
-      x.dataset.close = "1";
-      tabs.push(tabButton(state.tab, feedName(f), x, feedIcon(f.id)));
-    }
+  tabsEl.replaceChildren(
+    tabButton("unread", "Unread", state.totalUnread ? span("n", state.totalUnread) : null),
+    tabButton("all", "All"),
+    tabButton("feeds", "Feeds"),
+  );
+  $("new-cat").hidden = state.tab !== "feeds";
+  renderPins();
+}
+
+function pinEntries() {
+  const entries = [];
+  const add = (tab, label, icon, unread) => entries.push({ tab, label, icon, unread });
+  const addCat = (c) => add("cat:" + c.id, c.name, catIcon(c), catUnread(c.id));
+  const addFeed = (f) => add("feed:" + f.id, feedName(f), feedIcon(f.id), f.unread);
+  state.categories.filter((c) => c.pinned).forEach(addCat);
+  state.feeds.filter((f) => f.pinned).forEach(addFeed);
+  if (!entries.some((e) => e.tab === state.tab)) {
+    const [kind, id] = state.tab.split(":");
+    const c = kind === "cat" && catOf(Number(id));
+    const f = kind === "feed" && feedOf(Number(id));
+    if (c) addCat(c);
+    else if (f) addFeed(f);
   }
-  tabs.push(tabButton("feeds", "Feeds"));
-  tabsEl.replaceChildren(...tabs);
-  filterEl.placeholder = state.tab === "feeds" ? "Filter feeds" : "Filter";
+  return entries;
+}
+
+function renderPins() {
+  const buttons = pinEntries().map((e) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "pin";
+    b.dataset.tab = e.tab;
+    b.title = e.label;
+    b.setAttribute("aria-label", e.label);
+    b.setAttribute("aria-pressed", String(state.tab === e.tab));
+    b.append(e.icon);
+    if (e.unread) b.append(span("dot", ""));
+    return b;
+  });
+  pinsEl.replaceChildren(...buttons);
+  pinsEl.hidden = buttons.length === 0;
 }
 
 function setTab(tab) {
@@ -171,11 +214,12 @@ function setTab(tab) {
   show();
 }
 
-tabsEl.addEventListener("click", (e) => {
-  const tab = e.target.closest("[data-tab]");
+// Pressing the open icon again goes back to Unread.
+document.addEventListener("click", (e) => {
+  const tab = e.target.closest("#tabs [data-tab], #pins [data-tab]");
   if (!tab) return;
-  if (e.target.dataset.close) return setTab("unread");
-  setTab(tab.dataset.tab);
+  const id = tab.dataset.tab;
+  setTab(id === state.tab && tab.closest("#pins") ? "unread" : id);
 });
 
 // ---------- list ----------
@@ -259,12 +303,15 @@ filterEl.addEventListener("keydown", (e) => {
   if (e.key === "Escape") { filterEl.value = ""; filterEl.dispatchEvent(new Event("input")); filterEl.blur(); }
 });
 
-// ---------- feeds tab ----------
+// ---------- feeds tab: manage categories and feeds ----------
 
+// Fine-line, sharp-cornered marks to match the engraved category icons.
 const SVG = {
-  pin: "M9 4.5h6l-.8 5.5 2.8 3H7l2.8-3zM12 13v7",
-  check: "M5 12.5l4.5 4.5L19 7",
-  x: "M6 6l12 12M18 6L6 18",
+  pin: '<path d="M9 3h6M10.2 3l.6 6.6L7.5 13h9l-3.3-3.4.6-6.6M12 13v8"/>',
+  check: '<path d="M5.5 13l4 4L20 6.5"/>',
+  x: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  edit: '<path d="M8 6.5h8l-1.2 8L12 20.5l-2.8-6z"/><path d="M12 10v8.5"/><path d="M9.5 3.5h5v3h-5z"/><circle cx="12" cy="8.6" r=".9" fill="currentColor" stroke="none"/>',
+  folder: '<path d="M3.5 6.5h6l2 2.5h9v10.5h-17z"/>',
 };
 function iconButton(name, label, action, pressed) {
   const b = document.createElement("button");
@@ -274,37 +321,187 @@ function iconButton(name, label, action, pressed) {
   b.title = label;
   b.setAttribute("aria-label", label);
   if (pressed !== undefined) b.setAttribute("aria-pressed", String(pressed));
-  b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${SVG[name]}"/></svg>`;
+  b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${SVG[name]}</svg>`;
   return b;
+}
+
+function openButton(icon, name, unread, extra = []) {
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "feed-open";
+  open.dataset.action = "open";
+  open.append(icon, span("name", name), ...extra);
+  if (unread) open.append(span("n", unread));
+  return open;
+}
+
+function feedRow(f) {
+  const row = document.createElement("div");
+  row.className = "feed-row";
+  row.dataset.feed = f.id;
+  const bad = f.last_error ? [Object.assign(span("bad", "!"), { title: f.last_error })] : [];
+  const tools = span("feed-tools", "");
+  tools.append(
+    iconButton("pin", f.pinned ? "Unpin" : "Pin to the icon row", "pin", f.pinned),
+    iconButton("folder", "Move to a category", "move"),
+    iconButton("check", "Mark all read", "read"),
+    iconButton("x", "Remove feed", "remove"),
+  );
+  row.append(openButton(feedIcon(f.id), feedName(f), f.unread, bad), tools);
+  return row;
+}
+
+// Heading for feeds that aren't in any category; same shape as a category heading.
+function uncategorizedHead() {
+  const head = document.createElement("div");
+  head.className = "section-head";
+  head.setAttribute("role", "heading");
+  const label = span("head-label", "");
+  label.append(span("name", "Uncategorized"));
+  head.append(label);
+  return head;
+}
+
+// A category is a heading in the feed list; its tools sit on the heading itself.
+function categoryHead(c) {
+  const head = document.createElement("div");
+  head.className = "section-head cat-head";
+  head.dataset.cat = c.id;
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "head-open";
+  open.dataset.action = "open";
+  open.title = `Open ${c.name}`;
+  open.append(span("name", c.name));
+  if (c.icon) open.append(catIcon(c)); // the icon follows the name, like a trailing mark
+  const unread = catUnread(c.id);
+  if (unread) open.append(span("n", unread));
+  const tools = span("feed-tools", "");
+  tools.append(
+    iconButton("pin", c.pinned ? "Unpin" : "Pin to the icon row", "pin", c.pinned),
+    iconButton("edit", "Edit name and icon", "edit"),
+    iconButton("check", "Mark all read", "read"),
+    iconButton("x", "Delete category", "remove"),
+  );
+  head.append(open, tools);
+  return head;
 }
 
 function renderFeeds() {
   const q = filterEl.value.trim().toLowerCase();
-  const rows = state.feeds
-    .filter((f) => !q || feedName(f).toLowerCase().includes(q))
-    .map((f) => {
-      const row = document.createElement("div");
-      row.className = "feed-row";
-      row.dataset.feed = f.id;
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "feed-open";
-      open.dataset.action = "open";
-      open.append(feedIcon(f.id), span("name", feedName(f)));
-      if (f.last_error) open.append(Object.assign(span("bad", "!"), { title: f.last_error }));
-      if (f.pinned) open.append(span("pin", "●"));
-      if (f.unread) open.append(span("n", f.unread));
-      const tools = span("feed-tools", "");
-      tools.append(
-        iconButton("pin", f.pinned ? "Unpin" : "Pin to tabs", "pin", f.pinned),
-        iconButton("check", "Mark all read", "read"),
-        iconButton("x", "Remove feed", "remove"),
-      );
-      row.append(open, tools);
-      return row;
-    });
-  listEl.replaceChildren(...(rows.length ? rows : [span("note", state.feeds.length ? "Nothing matches." : "No feeds yet. Press + to add one.")]));
+  const feeds = state.feeds.filter((f) => !q || feedName(f).toLowerCase().includes(q));
+  const out = [];
+
+  for (const c of state.categories) {
+    const members = feeds.filter((f) => f.category_id === c.id);
+    if (q && !members.length && !c.name.toLowerCase().includes(q)) continue;
+    out.push(categoryHead(c), ...members.map(feedRow));
+  }
+  const loose = feeds.filter((f) => !catOf(f.category_id));
+  if (loose.length) {
+    if (state.categories.length) out.push(uncategorizedHead());
+    out.push(...loose.map(feedRow));
+  }
+  if (!out.length) out.push(span("note", state.feeds.length ? "Nothing matches." : "No feeds yet. Press + above to add one."));
+  listEl.replaceChildren(...out);
 }
+
+// A small pop-up list anchored to a button.
+let menuEl = null;
+function closeMenu() { menuEl?.remove(); menuEl = null; }
+function openMenu(anchor, entries) {
+  closeMenu();
+  menuEl = document.createElement("div");
+  menuEl.className = "menu";
+  menuEl.setAttribute("role", "menu");
+  for (const e of entries) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "menu-item";
+    b.setAttribute("role", "menuitem");
+    b.setAttribute("aria-checked", String(!!e.checked));
+    b.append(e.icon ?? span("fav", ""), span("name", e.label));
+    b.addEventListener("click", () => { closeMenu(); e.pick(); });
+    menuEl.append(b);
+  }
+  document.body.append(menuEl);
+  const r = anchor.getBoundingClientRect();
+  menuEl.style.left = `${Math.min(r.left, window.innerWidth - menuEl.offsetWidth - 8)}px`;
+  menuEl.style.top = `${Math.min(r.bottom + 4, window.innerHeight - menuEl.offsetHeight - 8)}px`;
+  menuEl.querySelector("button")?.focus();
+}
+document.addEventListener("click", (e) => { if (menuEl && !menuEl.contains(e.target) && !e.target.closest('[data-action="move"]')) closeMenu(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+
+// ---- category dialog ----
+
+const catDialog = $("cat");
+const catForm = $("cat-form");
+const catName = $("cat-name");
+const catIcons = $("cat-icons");
+const catError = $("cat-error");
+const catSubmit = $("cat-submit");
+let catEditing = 0;
+let catChoice = "";
+let iconNames = null;
+
+async function openCategoryDialog(cat) {
+  catEditing = cat?.id ?? 0;
+  catChoice = cat?.icon ?? "";
+  catName.value = cat?.name ?? "";
+  catError.textContent = "";
+  $("cat-title").textContent = cat ? "Edit category" : "New category";
+  iconNames ??= api("GET", "/icons").then((d) => d.icons);
+  let names = [];
+  try { names = await iconNames; } catch (err) { catError.textContent = err.message; iconNames = null; }
+  paintIconChoices(names);
+  catDialog.showModal();
+  catName.focus();
+}
+
+function paintIconChoices(names) {
+  catIcons.replaceChildren(...names.map((n) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "icon-choice";
+    b.dataset.icon = n;
+    b.title = n;
+    b.setAttribute("aria-label", n);
+    b.setAttribute("aria-pressed", String(n === catChoice));
+    b.append(catIcon({ icon: n, name: n }));
+    return b;
+  }));
+}
+
+$("new-cat").addEventListener("click", () => openCategoryDialog());
+
+catIcons.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-icon]");
+  if (!b) return;
+  catChoice = catChoice === b.dataset.icon ? "" : b.dataset.icon; // pressing again clears it
+  catIcons.querySelectorAll("[data-icon]").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.icon === catChoice)));
+});
+$("cat-cancel").addEventListener("click", () => catDialog.close());
+catDialog.addEventListener("click", (e) => { if (e.target === catDialog) catDialog.close(); });
+
+catForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  catError.textContent = "";
+  catSubmit.disabled = true;
+  try {
+    const body = { name: catName.value.trim(), icon: catChoice };
+    if (catEditing) await api("PATCH", `/categories/${catEditing}`, body);
+    else await api("POST", "/categories", body);
+    catDialog.close();
+    await afterFeedChange();
+    renderTabs();
+    if (state.tab === "feeds") renderFeeds();
+  } catch (err) {
+    catError.textContent = err.message;
+  } finally {
+    catSubmit.disabled = false;
+  }
+});
 
 async function afterFeedChange() {
   lists.clear();
@@ -321,18 +518,30 @@ async function revalidateAll() {
 
 listEl.addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-action]");
-  const row = e.target.closest("[data-feed]");
-  if (!btn || !row) return;
-  const id = Number(row.dataset.feed);
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const feedRowEl = e.target.closest("[data-feed]");
+  const catRowEl = e.target.closest("[data-cat]");
+  const kind = catRowEl ? "categories" : "feeds";
+  const id = Number((catRowEl ?? feedRowEl)?.dataset[catRowEl ? "cat" : "feed"]);
+  if (!id) return;
   const f = feedOf(id);
+  const c = catOf(id);
   try {
-    switch (btn.dataset.action) {
-      case "open": return setTab("feed:" + id);
-      case "pin": await api("POST", `/feeds/${id}/pin`); break;
-      case "read": await api("POST", `/feeds/${id}/read`); break;
+    switch (action) {
+      case "open": return setTab((catRowEl ? "cat:" : "feed:") + id);
+      case "edit": return openCategoryDialog(c);
+      case "move":
+        return openMenu(btn, [
+          { label: "No category", checked: !f.category_id, pick: () => moveFeed(id, 0) },
+          ...state.categories.map((cat) => ({ label: cat.name, icon: catIcon(cat), checked: f.category_id === cat.id, pick: () => moveFeed(id, cat.id) })),
+        ]);
+      case "pin": await api("POST", `/${kind}/${id}/pin`); break;
+      case "read": await api("POST", `/${kind}/${id}/read`); break;
       case "remove":
-        if (!confirm(`Remove ${feedName(f)}?`)) return;
-        await api("DELETE", `/feeds/${id}`);
+        if (!confirm(catRowEl ? `Delete the category ${c.name}? Its feeds stay, uncategorized.` : `Remove ${feedName(f)}?`)) return;
+        await api("DELETE", `/${kind}/${id}`);
+        if (state.tab === (catRowEl ? "cat:" : "feed:") + id) state.tab = "feeds";
         break;
     }
     await afterFeedChange();
@@ -342,6 +551,17 @@ listEl.addEventListener("click", async (e) => {
     alert(err.message);
   }
 });
+
+async function moveFeed(feedId, categoryId) {
+  try {
+    await api("PUT", `/feeds/${feedId}/category`, { category_id: categoryId });
+    await afterFeedChange();
+    renderTabs();
+    renderFeeds();
+  } catch (err) {
+    alert(err.message);
+  }
+}
 
 // ---------- viewer ----------
 

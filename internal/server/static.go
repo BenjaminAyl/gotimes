@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"io/fs"
 	"net/http"
+	"slices"
+	"strings"
 )
 
 // frontend serves the embedded single-page app. Asset URLs carry a content hash
@@ -14,6 +16,7 @@ import (
 type frontend struct {
 	index  []byte
 	assets http.Handler
+	icons  []string // names of the category icons in assets/icons, without ".svg"
 }
 
 func newFrontend(webFS fs.FS) (*frontend, error) {
@@ -25,9 +28,20 @@ func newFrontend(webFS fs.FS) (*frontend, error) {
 	if err != nil {
 		return nil, err
 	}
+	entries, err := fs.ReadDir(webFS, "assets/icons")
+	if err != nil {
+		return nil, err
+	}
+	icons := []string{}
+	for _, e := range entries {
+		if name, ok := strings.CutSuffix(e.Name(), ".svg"); ok {
+			icons = append(icons, name)
+		}
+	}
 	return &frontend{
 		index:  bytes.ReplaceAll(index, []byte("__V__"), []byte(v)),
 		assets: http.FileServerFS(webFS),
+		icons:  icons,
 	}, nil
 }
 
@@ -62,3 +76,5 @@ func (f *frontend) serveAssets(w http.ResponseWriter, r *http.Request) {
 	}
 	f.assets.ServeHTTP(w, r)
 }
+
+func (f *frontend) hasIcon(name string) bool { return slices.Contains(f.icons, name) }

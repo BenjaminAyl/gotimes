@@ -53,6 +53,9 @@ func run(addr string) error {
 	st := store.New(conn)
 	// ALLOW_PRIVATE_FETCH lets the fetcher reach private addresses (tests only).
 	fetcher := feeds.NewFetcher(os.Getenv("ALLOW_PRIVATE_FETCH") == "1")
+	// ICON_SERVICE is an optional last-resort icon source, e.g.
+	// https://icons.duckduckgo.com/ip3/%s.ico. It learns which sites you follow, so it is off by default.
+	fetcher.IconService = os.Getenv("ICON_SERVICE")
 	sched := feeds.NewScheduler(st, fetcher, fetchWorkers)
 
 	srv, err := server.New(server.Config{DevEmail: os.Getenv("DEV_EMAIL")}, st, fetcher, sched, web.FS)

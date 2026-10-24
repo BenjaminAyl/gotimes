@@ -37,6 +37,11 @@ const (
 // Fetcher downloads and parses feeds.
 type Fetcher struct {
 	client *http.Client
+
+	// IconService, if set, is a last-resort source of icons for sites that block
+	// us: a URL template with one %s for the site's hostname. Using it tells that
+	// service which sites you follow, so it is off unless configured.
+	IconService string
 }
 
 // NewFetcher returns a Fetcher. Unless allowPrivate is set, it refuses to
@@ -121,6 +126,9 @@ func (f *Fetcher) fetch(ctx context.Context, st store.FeedState, res *store.Fetc
 
 	res.Title = strings.TrimSpace(parsed.Title)
 	res.SiteURL = parsed.Link
+	if parsed.Image != nil {
+		res.ImageURL = parsed.Image.URL
+	}
 	res.ETag = resp.Header.Get("ETag")
 	res.LastModified = resp.Header.Get("Last-Modified")
 	res.Items = make([]store.NewItem, 0, len(parsed.Items))

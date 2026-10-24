@@ -39,12 +39,13 @@ type FeedSub struct {
 	LastError string `json:"last_error"`
 	Unread    int    `json:"unread"`
 	Pinned    bool   `json:"pinned"`
-	IconV     int64  `json:"icon_v"` // 0 = no icon; otherwise a version for /api/feeds/{id}/icon?v=
+	Category  int64  `json:"category_id"` // 0 = not filed
+	IconV     int64  `json:"icon_v"`      // 0 = no icon; otherwise a version for /api/feeds/{id}/icon?v=
 }
 
 func (s *Store) Feeds(ctx context.Context, userID int64) ([]FeedSub, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT f.id, f.title, f.url, f.last_error, s.pinned,
+		SELECT f.id, f.title, f.url, f.last_error, s.pinned, COALESCE(s.category_id, 0),
 		       CASE WHEN f.icon IS NULL THEN 0 ELSE f.icon_checked_at END,
 		       (SELECT COUNT(*) FROM items i
 		         WHERE i.feed_id = f.id
@@ -59,7 +60,7 @@ func (s *Store) Feeds(ctx context.Context, userID int64) ([]FeedSub, error) {
 	var out []FeedSub
 	for rows.Next() {
 		var f FeedSub
-		if err := rows.Scan(&f.ID, &f.Title, &f.URL, &f.LastError, &f.Pinned, &f.IconV, &f.Unread); err != nil {
+		if err := rows.Scan(&f.ID, &f.Title, &f.URL, &f.LastError, &f.Pinned, &f.Category, &f.IconV, &f.Unread); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -115,25 +116,37 @@ func (s *Store) queryItems(ctx context.Context, query string, args ...any) ([]It
 // likeEscaper makes user text safe inside a LIKE pattern (with ESCAPE '\').
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
-// Items lists the user's newest items, optionally limited to one feed and/or
-// to those whose title, summary, author or feed name contain text.
-func (s *Store) Items(ctx context.Context, userID, feedID int64, unreadOnly bool, text string, limit int) ([]Item, error) {
+// ItemFilter narrows Items. Zero values mean "no filter"; Limit is required.
+type ItemFilter struct {
+	FeedID     int64
+	CategoryID int64
+	UnreadOnly bool
+	Text       string // matches title, summary, author or feed name
+	Limit      int
+}
+
+// Items lists the user's newest items.
+func (s *Store) Items(ctx context.Context, userID int64, f ItemFilter) ([]Item, error) {
 	conds := []string{"1=1"}
 	args := []any{userID, userID}
-	if feedID != 0 {
+	if f.FeedID != 0 {
 		conds = append(conds, "i.feed_id = ?")
-		args = append(args, feedID)
+		args = append(args, f.FeedID)
 	}
-	if unreadOnly {
+	if f.CategoryID != 0 {
+		conds = append(conds, "s.category_id = ?")
+		args = append(args, f.CategoryID)
+	}
+	if f.UnreadOnly {
 		conds = append(conds, "NOT EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?)")
 		args = append(args, userID)
 	}
-	if text != "" {
-		pat := "%" + likeEscaper.Replace(text) + "%"
+	if f.Text != "" {
+		pat := "%" + likeEscaper.Replace(f.Text) + "%"
 		conds = append(conds, `(i.title LIKE ? ESCAPE '\' OR i.summary LIKE ? ESCAPE '\' OR i.author LIKE ? ESCAPE '\' OR f.title LIKE ? ESCAPE '\')`)
 		args = append(args, pat, pat, pat, pat)
 	}
-	args = append(args, limit)
+	args = append(args, f.Limit)
 	return s.queryItems(ctx, itemQuery("''")+" WHERE "+strings.Join(conds, " AND ")+
 		" ORDER BY i.published_at DESC, i.id DESC LIMIT ?", args...)
 }
@@ -260,15 +273,16 @@ func (s *Store) RefreshUserFeeds(ctx context.Context, userID int64) error {
 
 // IconTarget is a feed whose icon should be (re)fetched.
 type IconTarget struct {
-	ID      int64
-	URL     string // the feed address, used when the feed names no site
-	SiteURL string
+	ID       int64
+	URL      string // the feed address, used when the feed names no site
+	SiteURL  string
+	ImageURL string // the logo the feed itself declares, a fallback when the site blocks us
 }
 
 // IconsDue returns feeds whose icon was last checked before cutoff.
 func (s *Store) IconsDue(ctx context.Context, cutoff time.Time, limit int) ([]IconTarget, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, url, site_url FROM feeds WHERE icon_checked_at < ? ORDER BY icon_checked_at LIMIT ?`,
+		`SELECT id, url, site_url, image_url FROM feeds WHERE icon_checked_at < ? ORDER BY icon_checked_at LIMIT ?`,
 		cutoff.Unix(), limit)
 	if err != nil {
 		return nil, err
@@ -277,7 +291,7 @@ func (s *Store) IconsDue(ctx context.Context, cutoff time.Time, limit int) ([]Ic
 	var out []IconTarget
 	for rows.Next() {
 		var t IconTarget
-		if err := rows.Scan(&t.ID, &t.URL, &t.SiteURL); err != nil {
+		if err := rows.Scan(&t.ID, &t.URL, &t.SiteURL, &t.ImageURL); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -323,6 +337,7 @@ type FetchResult struct {
 	Err          error
 	Title        string
 	SiteURL      string
+	ImageURL     string
 	ETag         string
 	LastModified string
 	Items        []NewItem
@@ -354,9 +369,9 @@ func (s *Store) SaveFetch(ctx context.Context, r FetchResult, next time.Time) er
 			next.Unix(), r.FeedID)
 	default:
 		_, err = tx.ExecContext(ctx, `
-			UPDATE feeds SET title = ?, site_url = ?, etag = ?, last_modified = ?,
+			UPDATE feeds SET title = ?, site_url = ?, image_url = ?, etag = ?, last_modified = ?,
 			       last_error = '', failures = 0, next_fetch_at = ? WHERE id = ?`,
-			r.Title, r.SiteURL, r.ETag, r.LastModified, next.Unix(), r.FeedID)
+			r.Title, r.SiteURL, r.ImageURL, r.ETag, r.LastModified, next.Unix(), r.FeedID)
 		if err == nil {
 			err = insertItems(ctx, tx, r.FeedID, r.Items)
 		}

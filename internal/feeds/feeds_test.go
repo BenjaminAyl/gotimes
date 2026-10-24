@@ -100,7 +100,7 @@ func TestIconFromDeclaredLinkThenFavicon(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	data, ct := NewFetcher(true).Icon(context.Background(), srv.URL+"/")
+	data, ct := NewFetcher(true).Icon(context.Background(), srv.URL+"/", "")
 	if ct != "image/png" || len(data) != len(tinyPNG) {
 		t.Fatalf("ct=%q len=%d", ct, len(data))
 	}
@@ -111,12 +111,49 @@ func TestIconFromDeclaredLinkThenFavicon(t *testing.T) {
 	bare.HandleFunc("/favicon.ico", func(w http.ResponseWriter, _ *http.Request) { w.Write(tinyPNG) })
 	srv2 := httptest.NewServer(bare)
 	defer srv2.Close()
-	if _, ct := NewFetcher(true).Icon(context.Background(), srv2.URL+"/"); ct != "image/png" {
+	if _, ct := NewFetcher(true).Icon(context.Background(), srv2.URL+"/", ""); ct != "image/png" {
 		t.Fatalf("favicon fallback ct=%q", ct)
 	}
 	none := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<html>not an image</html>")) }))
 	defer none.Close()
-	if data, _ := NewFetcher(true).Icon(context.Background(), none.URL+"/"); data != nil {
+	if data, _ := NewFetcher(true).Icon(context.Background(), none.URL+"/", ""); data != nil {
 		t.Fatalf("html served as icon: %q", data)
+	}
+}
+
+func TestIconFoundInPageLargerThanTheReadLimit(t *testing.T) {
+	big := append([]byte(`<html><head><link rel="icon" href="/i.png"></head><body>`), make([]byte, 2<<20)...)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.Write(big) })
+	mux.HandleFunc("/i.png", func(w http.ResponseWriter, _ *http.Request) { w.Write(tinyPNG) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	if _, ct := NewFetcher(true).Icon(context.Background(), srv.URL+"/", ""); ct != "image/png" {
+		t.Fatalf("ct=%q: a long page must be read up to the limit, not rejected", ct)
+	}
+}
+
+func TestIconFallsBackToFeedLogoThenService(t *testing.T) {
+	// a site that blocks everything except the feed's own logo path
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "blocked", http.StatusForbidden) })
+	mux.HandleFunc("/logo.png", func(w http.ResponseWriter, _ *http.Request) { w.Write(tinyPNG) })
+	mux.HandleFunc("/svc/", func(w http.ResponseWriter, _ *http.Request) { w.Write(tinyPNG) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "blocked", http.StatusForbidden) }))
+	defer blocked.Close()
+
+	f := NewFetcher(true)
+	if _, ct := f.Icon(context.Background(), srv.URL+"/news", srv.URL+"/logo.png"); ct != "image/png" {
+		t.Fatalf("feed logo fallback ct=%q", ct)
+	}
+	// nothing from the site or the feed, and no service configured: no icon, and no third party asked
+	if data, _ := f.Icon(context.Background(), blocked.URL+"/", ""); data != nil {
+		t.Fatalf("got an icon from a blocked site")
+	}
+	f.IconService = srv.URL + "/svc/%s"
+	if _, ct := f.Icon(context.Background(), blocked.URL+"/", ""); ct != "image/png" {
+		t.Fatalf("service fallback ct=%q", ct)
 	}
 }

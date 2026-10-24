@@ -205,3 +205,82 @@ func TestFeedIconServed(t *testing.T) {
 		t.Fatalf("missing icon = %d", w.Code)
 	}
 }
+
+func TestCategories(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(sampleFeed)) }))
+	defer feed.Close()
+	h := newTestServer(t, "me@example.com")
+	hdr := map[string]string{clientHeader: "test"}
+
+	if w := do(h, "GET", "/api/icons", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"crescent"`) {
+		t.Fatalf("icons = %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "POST", "/api/categories", `{"name":"News","icon":"nope"}`, hdr); w.Code != 400 {
+		t.Fatalf("unknown icon = %d", w.Code)
+	}
+	if w := do(h, "POST", "/api/categories", `{"name":"  ","icon":"crescent"}`, hdr); w.Code != 400 {
+		t.Fatalf("blank name = %d", w.Code)
+	}
+	w := do(h, "POST", "/api/categories", `{"name":"News","icon":"crescent"}`, hdr)
+	var created struct{ ID int64 }
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || w.Code != 201 || created.ID == 0 {
+		t.Fatalf("create = %d %s", w.Code, w.Body)
+	}
+	cat := itoa(created.ID)
+	if w := do(h, "POST", "/api/categories", `{"name":"News","icon":"eye"}`, hdr); w.Code != 409 {
+		t.Fatalf("duplicate = %d", w.Code)
+	}
+
+	w = do(h, "POST", "/api/feeds", `{"url":"`+feed.URL+`"}`, hdr)
+	var added struct{ ID int64 }
+	json.Unmarshal(w.Body.Bytes(), &added)
+	fid := itoa(added.ID)
+	if w := do(h, "PUT", "/api/feeds/"+fid+"/category", `{"category_id":`+cat+`}`, hdr); w.Code != 204 {
+		t.Fatalf("file feed = %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "PUT", "/api/feeds/"+fid+"/category", `{"category_id":9999}`, hdr); w.Code != 404 {
+		t.Fatalf("file into missing category = %d", w.Code)
+	}
+	var fl struct {
+		Feeds      []store.FeedSub
+		Categories []store.Category
+	}
+	w = do(h, "GET", "/api/feeds", "", nil)
+	if err := json.Unmarshal(w.Body.Bytes(), &fl); err != nil || len(fl.Categories) != 1 ||
+		fl.Feeds[0].Category != created.ID || fl.Categories[0].Icon != "crescent" {
+		t.Fatalf("feeds = %s (%v)", w.Body, err)
+	}
+	if w := do(h, "GET", "/api/items?category="+cat, "", nil); !strings.Contains(w.Body.String(), `"Hello"`) {
+		t.Fatalf("category items = %s", w.Body)
+	}
+	if w := do(h, "GET", "/api/items?category=9999", "", nil); !strings.Contains(w.Body.String(), `"items":[]`) {
+		t.Fatalf("other category items = %s", w.Body)
+	}
+
+	if w := do(h, "POST", "/api/categories/"+cat+"/pin", "", hdr); w.Code != 204 {
+		t.Fatalf("pin = %d", w.Code)
+	}
+	if w := do(h, "PATCH", "/api/categories/"+cat, `{"name":"Daily","icon":"eye"}`, hdr); w.Code != 204 {
+		t.Fatalf("rename = %d", w.Code)
+	}
+	if w := do(h, "GET", "/api/feeds", "", nil); !strings.Contains(w.Body.String(), `"name":"Daily","icon":"eye","pinned":true`) {
+		t.Fatalf("after edit = %s", w.Body)
+	}
+
+	// someone else can't touch or use my category
+	other := map[string]string{accessEmailHeader: "other@example.com", clientHeader: "test"}
+	if w := do(h, "DELETE", "/api/categories/"+cat, "", other); w.Code != 204 {
+		t.Fatalf("other delete = %d", w.Code) // a no-op for them
+	}
+	if w := do(h, "GET", "/api/feeds", "", nil); !strings.Contains(w.Body.String(), `"Daily"`) {
+		t.Fatalf("category vanished: %s", w.Body)
+	}
+
+	if w := do(h, "DELETE", "/api/categories/"+cat, "", hdr); w.Code != 204 {
+		t.Fatalf("delete = %d", w.Code)
+	}
+	w = do(h, "GET", "/api/feeds", "", nil)
+	if err := json.Unmarshal(w.Body.Bytes(), &fl); err != nil || len(fl.Categories) != 0 || fl.Feeds[0].Category != 0 {
+		t.Fatalf("after delete = %s", w.Body)
+	}
+}

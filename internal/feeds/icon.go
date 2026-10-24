@@ -2,6 +2,7 @@ package feeds
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -13,14 +14,15 @@ import (
 )
 
 const (
-	maxIcon       = 128 << 10
-	maxIconPage   = 1 << 20
+	maxIcon       = 256 << 10
+	maxIconPage   = 1 << 20 // the <head> is all we need; the rest of a big page is ignored
 	iconRecheck   = 7 * 24 * time.Hour
-	iconRetryWait = 24 * time.Hour // after a failed check, try again sooner than a week
+	iconRetryWait = time.Hour // after a failed check, try again sooner than a week
 )
 
-// get downloads up to limit bytes of a URL through the guarded client.
-func (f *Fetcher) get(ctx context.Context, u string, limit int64) ([]byte, http.Header, error) {
+// get downloads a URL through the guarded client. A body longer than limit is
+// cut off if truncate is set (enough for a page's head), otherwise it's an error.
+func (f *Fetcher) get(ctx context.Context, u string, limit int64, truncate bool) ([]byte, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, nil, err
@@ -35,8 +37,14 @@ func (f *Fetcher) get(ctx context.Context, u string, limit int64) ([]byte, http.
 		return nil, nil, &statusError{resp.Status}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil || int64(len(b)) > limit {
-		return nil, nil, errTooBig
+	if err != nil {
+		return nil, nil, err
+	}
+	if int64(len(b)) > limit {
+		if !truncate {
+			return nil, nil, errTooBig
+		}
+		b = b[:limit]
 	}
 	return b, resp.Header, nil
 }
@@ -48,25 +56,40 @@ func (e *statusError) Error() string { return "unexpected status " + e.status }
 var errTooBig = &statusError{"body too large"}
 
 // Icon finds a site's icon: the <link rel="icon"> its page declares, else
-// /favicon.ico. It returns nil if none can be fetched.
-func (f *Fetcher) Icon(ctx context.Context, pageURL string) ([]byte, string) {
+// /favicon.ico, else the logo the feed declares (imageURL), else the optional
+// IconService. It returns nil if none can be fetched.
+func (f *Fetcher) Icon(ctx context.Context, pageURL, imageURL string) ([]byte, string) {
 	base, err := url.Parse(pageURL)
 	if err != nil || base.Host == "" {
 		return nil, ""
 	}
 	var candidates []string
-	if page, _, err := f.get(ctx, pageURL, maxIconPage); err == nil {
+	if page, _, err := f.get(ctx, pageURL, maxIconPage, true); err == nil {
 		candidates = iconLinks(page, pageURL)
 	}
-	candidates = append(candidates, base.Scheme+"://"+base.Host+"/favicon.ico")
-	for _, c := range candidates[:min(len(candidates), 4)] {
-		b, hdr, err := f.get(ctx, c, maxIcon)
-		if err != nil || len(b) == 0 {
-			continue
-		}
-		if ct := imageType(b, hdr.Get("Content-Type")); ct != "" {
+	candidates = append(candidates[:min(len(candidates), 3)], base.Scheme+"://"+base.Host+"/favicon.ico")
+	if u, ok := resolve(pageURL, imageURL); ok && imageURL != "" {
+		candidates = append(candidates, u)
+	}
+	if f.IconService != "" {
+		candidates = append(candidates, fmt.Sprintf(f.IconService, base.Hostname()))
+	}
+	for _, c := range candidates {
+		if b, ct := f.fetchImage(ctx, c); b != nil {
 			return b, ct
 		}
+	}
+	return nil, ""
+}
+
+// fetchImage downloads one candidate icon, or returns nil if it isn't an image.
+func (f *Fetcher) fetchImage(ctx context.Context, u string) ([]byte, string) {
+	b, hdr, err := f.get(ctx, u, maxIcon, false)
+	if err != nil || len(b) == 0 {
+		return nil, ""
+	}
+	if ct := imageType(b, hdr.Get("Content-Type")); ct != "" {
+		return b, ct
 	}
 	return nil, ""
 }
@@ -108,7 +131,7 @@ func FillIcon(ctx context.Context, st *store.Store, f *Fetcher, t store.IconTarg
 	if site == "" {
 		site = t.URL
 	}
-	data, ct := f.Icon(ctx, site)
+	data, ct := f.Icon(ctx, site, t.ImageURL)
 	checked := time.Now()
 	if len(data) == 0 {
 		checked = checked.Add(-iconRecheck + iconRetryWait)

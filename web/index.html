@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="asset-v" content="__V__">
 <meta name="theme-color" content="#f1ecdf">
 <title>rss</title>
 <link rel="icon" href="/assets/favicon.svg?v=__V__" type="image/svg+xml">
@@ -16,16 +17,20 @@
       <h1 class="brand"><img class="mark" src="/assets/mark.svg?v=__V__" alt="">rss</h1>
       <div class="tools">
         <button type="button" class="icon-btn" id="refresh" aria-label="Refresh" title="Refresh">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.4-5.5M19.5 4v4.5H15"/></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.4-5.5M19.5 3.5V8.500H14.500"/></svg>
         </button>
         <button type="button" class="icon-btn" id="add-open" aria-label="Add feed" title="Add feed">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5v15M4.5 12h15"/></svg>
         </button>
       </div>
     </header>
     <nav class="tabs" id="tabs" role="tablist" aria-label="Views"></nav>
+    <div class="pins" id="pins" aria-label="Pinned feeds and categories" hidden></div>
     <div class="filter">
       <input type="search" id="filter" placeholder="Filter" aria-label="Filter" autocomplete="off" spellcheck="false">
+      <button type="button" class="icon-btn" id="new-cat" aria-label="New category" title="New category" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2.5h9v10.5h-17zM12 12.5v5M9.5 15h5"/></svg>
+      </button>
     </div>
     <div class="scroll" id="list"></div>
   </aside>
@@ -43,6 +48,19 @@
     <div class="actions">
       <button type="button" class="text-btn" id="add-cancel">Cancel</button>
       <button type="submit" class="solid-btn" id="add-submit">Add</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="cat" aria-labelledby="cat-title">
+  <form id="cat-form" method="dialog">
+    <h2 id="cat-title">New category</h2>
+    <input type="text" id="cat-name" placeholder="Name" aria-label="Category name" maxlength="40" required autocomplete="off" spellcheck="false">
+    <div class="icon-grid" id="cat-icons" role="group" aria-label="Icon"></div>
+    <p class="error" id="cat-error" role="alert"></p>
+    <div class="actions">
+      <button type="button" class="text-btn" id="cat-cancel">Cancel</button>
+      <button type="submit" class="solid-btn" id="cat-submit">Save</button>
     </div>
   </form>
 </dialog>
