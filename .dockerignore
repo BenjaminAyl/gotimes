@@ -3,5 +3,4 @@
 data
 tmp
 *.md
-compose.yaml
 Dockerfile

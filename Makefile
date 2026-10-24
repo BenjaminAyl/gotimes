@@ -1,10 +1,10 @@
-.PHONY: dev build test lint up down logs
+.PHONY: dev build test lint image
 
 dev:
 	air -c .air.toml
 
 build:
-	go build -o bin/gotimes ./cmd/gotimes
+	go build -o bin/rss ./cmd/rss
 
 test:
 	go test ./...
@@ -12,11 +12,5 @@ test:
 lint:
 	golangci-lint run
 
-up:
-	./scripts/build.sh
-
-down:
-	docker compose down
-
-logs:
-	docker compose logs -f
+image:
+	docker build -t rss .

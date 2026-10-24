@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f1ecdf">
+<title>rss</title>
+<link rel="icon" href="/assets/favicon.svg?v=__V__" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/app.css?v=__V__">
+<script type="module" src="/assets/app.js?v=__V__"></script>
+</head>
+<body data-view="list">
+<div class="app">
+  <aside class="pane list" aria-label="Feed">
+    <header class="bar">
+      <h1 class="brand"><img class="mark" src="/assets/mark.svg?v=__V__" alt="">rss</h1>
+      <div class="tools">
+        <button type="button" class="icon-btn" id="refresh" aria-label="Refresh" title="Refresh">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.4-5.5M19.5 4v4.5H15"/></svg>
+        </button>
+        <button type="button" class="icon-btn" id="add-open" aria-label="Add feed" title="Add feed">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+    </header>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Views"></nav>
+    <div class="filter">
+      <input type="search" id="filter" placeholder="Filter" aria-label="Filter" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="scroll" id="list"></div>
+  </aside>
+
+  <main class="pane viewer" id="viewer" aria-live="polite">
+    <div class="empty"><img class="mark big" src="/assets/mark.svg?v=__V__" alt=""><p>導き</p></div>
+  </main>
+</div>
+
+<dialog id="add" aria-labelledby="add-title">
+  <form id="add-form" method="dialog">
+    <h2 id="add-title">Add a feed</h2>
+    <input type="url" id="add-url" placeholder="https://example.com/feed.xml" aria-label="Feed address" required autocomplete="off" spellcheck="false">
+    <p class="error" id="add-error" role="alert"></p>
+    <div class="actions">
+      <button type="button" class="text-btn" id="add-cancel">Cancel</button>
+      <button type="submit" class="solid-btn" id="add-submit">Add</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

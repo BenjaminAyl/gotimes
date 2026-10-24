@@ -2,11 +2,13 @@ package feeds
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/benaylward/gotimes/internal/store"
+	"github.com/benaylward/rss/internal/store"
 )
 
 func TestSummarizeStripsMarkup(t *testing.T) {
@@ -53,5 +55,68 @@ func TestSanitizeStripsActiveContent(t *testing.T) {
 	}
 	if !strings.Contains(got, `rel="`) || !strings.Contains(got, `target="_blank"`) {
 		t.Fatalf("links should open safely in a new tab: %q", got)
+	}
+}
+
+func TestAlternateLinks(t *testing.T) {
+	page := `<html><head>
+		<link rel="stylesheet" href="/x.css">
+		<link rel="alternate" type="application/rss+xml" title="News" href="/news/rss">
+		<link rel="alternate" type="text/html" href="/other">
+		<link rel="Alternate" type="application/atom+xml" href="https://elsewhere.test/atom">
+	</head></html>`
+	got := alternateLinks([]byte(page), "https://example.test/forever/news?;rss")
+	want := []string{"https://example.test/news/rss", "https://elsewhere.test/atom"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestDiscoverFollowsAdvertisedFeed(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/page", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`<html><head><link rel="alternate" type="application/rss+xml" href="/feed.xml"></head></html>`))
+	})
+	mux.HandleFunc("/feed.xml", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>Real</title><item><title>One</title><guid>1</guid></item></channel></rss>`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	got, res := NewFetcher(true).Discover(context.Background(), store.FeedState{URL: srv.URL + "/page"})
+	if res.Err != nil || got != srv.URL+"/feed.xml" || res.Title != "Real" || len(res.Items) != 1 {
+		t.Fatalf("url=%s err=%v title=%q items=%d", got, res.Err, res.Title, len(res.Items))
+	}
+}
+
+var tinyPNG = []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89")
+
+func TestIconFromDeclaredLinkThenFavicon(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`<html><head><link rel="apple-touch-icon" href="/touch.png"><link rel="shortcut icon" href="/i.png"></head></html>`))
+	})
+	mux.HandleFunc("/i.png", func(w http.ResponseWriter, _ *http.Request) { w.Write(tinyPNG) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	data, ct := NewFetcher(true).Icon(context.Background(), srv.URL+"/")
+	if ct != "image/png" || len(data) != len(tinyPNG) {
+		t.Fatalf("ct=%q len=%d", ct, len(data))
+	}
+
+	// no declared icon: fall back to /favicon.ico; an HTML error page is not an icon
+	bare := http.NewServeMux()
+	bare.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<html></html>")) })
+	bare.HandleFunc("/favicon.ico", func(w http.ResponseWriter, _ *http.Request) { w.Write(tinyPNG) })
+	srv2 := httptest.NewServer(bare)
+	defer srv2.Close()
+	if _, ct := NewFetcher(true).Icon(context.Background(), srv2.URL+"/"); ct != "image/png" {
+		t.Fatalf("favicon fallback ct=%q", ct)
+	}
+	none := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("<html>not an image</html>")) }))
+	defer none.Close()
+	if data, _ := NewFetcher(true).Icon(context.Background(), none.URL+"/"); data != nil {
+		t.Fatalf("html served as icon: %q", data)
 	}
 }

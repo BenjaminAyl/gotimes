@@ -1,45 +1,207 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
-	"testing/fstest"
+
+	"github.com/benaylward/rss/internal/db"
+	"github.com/benaylward/rss/internal/feeds"
+	"github.com/benaylward/rss/internal/store"
+	"github.com/benaylward/rss/web"
 )
 
-func TestAssetVersionChangesWithContent(t *testing.T) {
-	a, _ := assetVersion(fstest.MapFS{"app.css": {Data: []byte("a{}")}})
-	b, _ := assetVersion(fstest.MapFS{"app.css": {Data: []byte("b{}")}})
-	again, _ := assetVersion(fstest.MapFS{"app.css": {Data: []byte("a{}")}})
-	if a == b || a != again || len(a) != 10 {
-		t.Fatalf("a=%s b=%s again=%s", a, b, again)
+const sampleFeed = `<?xml version="1.0"?><rss version="2.0"><channel><title>Desk</title><link>http://127.0.0.1:1/</link>
+<item><title>Hello</title><link>http://x/1</link><guid>1</guid><description>Body</description></item></channel></rss>`
+
+func newTestServer(t *testing.T, dev string) http.Handler {
+	t.Helper()
+	conn, err := db.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := db.Migrate(conn); err != nil {
+		t.Fatal(err)
+	}
+	st := store.New(conn)
+	f := feeds.NewFetcher(true) // the test feed lives on loopback
+	srv, err := New(Config{DevEmail: dev}, st, f, feeds.NewScheduler(st, f, 1), web.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv.Handler()
+}
+
+func do(h http.Handler, method, path, body string, hdr map[string]string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func TestAuthAndCSRFGuards(t *testing.T) {
+	h := newTestServer(t, "")
+	if w := do(h, "GET", "/healthz", "", nil); w.Code != 200 {
+		t.Fatalf("healthz = %d", w.Code)
+	}
+	if w := do(h, "GET", "/api/feeds", "", nil); w.Code != 401 {
+		t.Fatalf("no identity = %d, want 401", w.Code)
+	}
+	who := map[string]string{accessEmailHeader: "me@example.com"}
+	if w := do(h, "GET", "/api/feeds", "", who); w.Code != 200 {
+		t.Fatalf("with identity = %d", w.Code)
+	}
+	if w := do(h, "POST", "/api/refresh", "", who); w.Code != 403 {
+		t.Fatalf("POST without client header = %d, want 403", w.Code)
+	}
+	if w := do(h, "GET", "/api/feeds", "", who); w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q", w.Header().Get("Cache-Control"))
 	}
 }
 
-func TestStaticCacheHeaders(t *testing.T) {
-	s := &Server{static: fstest.MapFS{
-		"app.css":       {Data: []byte("a{}")},
-		"fonts/x.woff2": {Data: []byte("f")},
-		"favicon.svg":   {Data: []byte("<svg/>")},
-	}}
-	h := secure(s.serveStatic())
-	cases := map[string]string{
-		"/static/app.css?v=abc": "public, max-age=31536000, immutable",
-		"/static/fonts/x.woff2": "public, max-age=31536000, immutable",
-		"/static/app.css":       "no-cache",
-		"/static/favicon.svg":   "no-cache",
+func TestSubscribeListReadFlow(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		w.Write([]byte(sampleFeed))
+	}))
+	defer feed.Close()
+
+	h := newTestServer(t, "")
+	me := map[string]string{accessEmailHeader: "me@example.com", clientHeader: "test"}
+
+	if w := do(h, "POST", "/api/feeds", `{"url":"ftp://nope"}`, me); w.Code != 400 {
+		t.Fatalf("bad url = %d", w.Code)
 	}
-	for path, want := range cases {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-		if got := rec.Header().Get("Cache-Control"); got != want {
-			t.Errorf("%s: Cache-Control %q, want %q", path, got, want)
+	w := do(h, "POST", "/api/feeds", `{"url":"`+feed.URL+`"}`, me)
+	if w.Code != 201 {
+		t.Fatalf("add = %d %s", w.Code, w.Body)
+	}
+
+	var items struct{ Items []store.Item }
+	w = do(h, "GET", "/api/items?unread=1", "", me)
+	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil || len(items.Items) != 1 {
+		t.Fatalf("items = %s (%v)", w.Body, err)
+	}
+	id := items.Items[0].ID
+
+	for q, want := range map[string]string{"hell": `"Hello"`, "zzz": `"items":[]`, "%": `"items":[]`} {
+		if w := do(h, "GET", "/api/items?q="+url.QueryEscape(q), "", me); !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("search %q = %s", q, w.Body)
 		}
 	}
-	// dynamic responses are never cached
-	rec := httptest.NewRecorder()
-	secure(http.NotFoundHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("dynamic Cache-Control %q", got)
+
+	if w := do(h, "POST", "/api/items/"+itoa(id)+"/read", "", me); w.Code != 204 {
+		t.Fatalf("read = %d", w.Code)
+	}
+	w = do(h, "GET", "/api/items?unread=1", "", me)
+	if !strings.Contains(w.Body.String(), `"items":[]`) {
+		t.Fatalf("unread after read = %s", w.Body)
+	}
+
+	var fl struct{ Feeds []store.FeedSub }
+	w = do(h, "GET", "/api/feeds", "", me)
+	if err := json.Unmarshal(w.Body.Bytes(), &fl); err != nil || len(fl.Feeds) != 1 || fl.Feeds[0].Unread != 0 {
+		t.Fatalf("feeds = %s (%v)", w.Body, err)
+	}
+	fid := itoa(fl.Feeds[0].ID)
+	if w := do(h, "POST", "/api/feeds/"+fid+"/pin", "", me); w.Code != 204 {
+		t.Fatalf("pin = %d", w.Code)
+	}
+	if w := do(h, "GET", "/api/feeds", "", me); !strings.Contains(w.Body.String(), `"pinned":true`) {
+		t.Fatalf("not pinned: %s", w.Body)
+	}
+	if w := do(h, "POST", "/api/feeds/nope/pin", "", me); w.Code != 404 {
+		t.Fatalf("bad id = %d", w.Code)
+	}
+
+	// another user sees nothing of mine
+	other := map[string]string{accessEmailHeader: "other@example.com"}
+	if w := do(h, "GET", "/api/items/"+itoa(id), "", other); w.Code != 404 {
+		t.Fatalf("other user's item = %d, want 404", w.Code)
+	}
+	if w := do(h, "GET", "/api/items/"+itoa(id), "", me); w.Code != 200 || !strings.Contains(w.Body.String(), `"title":"Hello"`) {
+		t.Fatalf("own item = %d %s", w.Code, w.Body)
+	}
+}
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+func TestUnsubscribeRemovesFeed(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(sampleFeed)) }))
+	defer feed.Close()
+	h := newTestServer(t, "me@example.com")
+	hdr := map[string]string{clientHeader: "test"}
+
+	w := do(h, "POST", "/api/feeds", `{"url":"`+feed.URL+`"}`, hdr)
+	var added struct{ ID int64 }
+	if err := json.Unmarshal(w.Body.Bytes(), &added); err != nil || added.ID == 0 {
+		t.Fatalf("add = %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "DELETE", "/api/feeds/"+itoa(added.ID), "", hdr); w.Code != 204 {
+		t.Fatalf("delete = %d", w.Code)
+	}
+	if w := do(h, "GET", "/api/feeds", "", nil); !strings.Contains(w.Body.String(), `"feeds":[]`) {
+		t.Fatalf("after delete: %s", w.Body)
+	}
+}
+
+func TestFrontendServedWithVersionedAssets(t *testing.T) {
+	h := newTestServer(t, "")
+	w := do(h, "GET", "/", "", nil)
+	body := w.Body.String()
+	if w.Code != 200 || strings.Contains(body, "__V__") || !strings.Contains(body, "/assets/app.js?v=") {
+		t.Fatalf("index = %d\n%s", w.Code, body)
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("index Cache-Control = %q", w.Header().Get("Cache-Control"))
+	}
+	if w := do(h, "GET", "/assets/app.js?v=abc", "", nil); w.Code != 200 || w.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("versioned asset = %d %q", w.Code, w.Header().Get("Cache-Control"))
+	}
+	if w := do(h, "GET", "/assets/app.js", "", nil); w.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("unversioned asset Cache-Control = %q", w.Header().Get("Cache-Control"))
+	}
+}
+
+func TestFeedIconServed(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89")
+	var site *httptest.Server
+	site = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/feed.xml":
+			w.Write([]byte(`<?xml version="1.0"?><rss version="2.0"><channel><title>Iconic</title><link>` + site.URL + `/</link><item><title>One</title><guid>1</guid></item></channel></rss>`))
+		case "/icon.png":
+			w.Write(png)
+		default:
+			w.Write([]byte(`<html><head><link rel="icon" href="/icon.png"></head></html>`))
+		}
+	}))
+	defer site.Close()
+
+	h := newTestServer(t, "me@example.com")
+	hdr := map[string]string{clientHeader: "test"}
+	if w := do(h, "POST", "/api/feeds", `{"url":"`+site.URL+`/feed.xml"}`, hdr); w.Code != 201 {
+		t.Fatalf("add = %d %s", w.Code, w.Body)
+	}
+	var fl struct{ Feeds []store.FeedSub }
+	w := do(h, "GET", "/api/feeds", "", nil)
+	if err := json.Unmarshal(w.Body.Bytes(), &fl); err != nil || len(fl.Feeds) != 1 || fl.Feeds[0].IconV == 0 {
+		t.Fatalf("feeds = %s (%v)", w.Body, err)
+	}
+	w = do(h, "GET", "/api/feeds/"+itoa(fl.Feeds[0].ID)+"/icon", "", nil)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "image/png" || w.Body.Len() != len(png) {
+		t.Fatalf("icon = %d %q %d bytes", w.Code, w.Header().Get("Content-Type"), w.Body.Len())
+	}
+	if w := do(h, "GET", "/api/feeds/9999/icon", "", nil); w.Code != 404 {
+		t.Fatalf("missing icon = %d", w.Code)
 	}
 }

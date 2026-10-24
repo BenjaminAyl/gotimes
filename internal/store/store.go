@@ -4,7 +4,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +13,7 @@ const maxItemsPerFeed = 200
 
 type Store struct {
 	db *sql.DB
-	// wmu serializes the large feed-write transactions so concurrent fetch
-	// workers don't spend their time fighting over SQLite's write lock.
+	// wmu serializes feed writes so fetch workers don't fight over SQLite's write lock.
 	wmu sync.Mutex
 }
 
@@ -33,32 +31,27 @@ func (s *Store) UserID(ctx context.Context, email string) (int64, error) {
 	return id, err
 }
 
-// FeedSub is a feed as shown in a user's subscription list.
+// FeedSub is a feed in a user's subscription list.
 type FeedSub struct {
-	ID        int64
-	Title     string
-	URL       string
-	LastError string
-	Unread    int
-	Pinned    bool
-}
-
-func (f FeedSub) Name() string {
-	if f.Title != "" {
-		return f.Title
-	}
-	return f.URL
+	ID        int64  `json:"id"`
+	Title     string `json:"title"`
+	URL       string `json:"url"`
+	LastError string `json:"last_error"`
+	Unread    int    `json:"unread"`
+	Pinned    bool   `json:"pinned"`
+	IconV     int64  `json:"icon_v"` // 0 = no icon; otherwise a version for /api/feeds/{id}/icon?v=
 }
 
 func (s *Store) Feeds(ctx context.Context, userID int64) ([]FeedSub, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT f.id, f.title, f.url, f.last_error, s.pinned,
+		       CASE WHEN f.icon IS NULL THEN 0 ELSE f.icon_checked_at END,
 		       (SELECT COUNT(*) FROM items i
 		         WHERE i.feed_id = f.id
 		           AND NOT EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?))
 		FROM feeds f JOIN subscriptions s ON s.feed_id = f.id
 		WHERE s.user_id = ?
-		ORDER BY s.pinned DESC, lower(CASE WHEN f.title = '' THEN f.url ELSE f.title END)`, userID, userID)
+		ORDER BY s.pinned DESC, lower(COALESCE(NULLIF(f.title, ''), f.url))`, userID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +59,7 @@ func (s *Store) Feeds(ctx context.Context, userID int64) ([]FeedSub, error) {
 	var out []FeedSub
 	for rows.Next() {
 		var f FeedSub
-		if err := rows.Scan(&f.ID, &f.Title, &f.URL, &f.LastError, &f.Pinned, &f.Unread); err != nil {
+		if err := rows.Scan(&f.ID, &f.Title, &f.URL, &f.LastError, &f.Pinned, &f.IconV, &f.Unread); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -74,52 +67,46 @@ func (s *Store) Feeds(ctx context.Context, userID int64) ([]FeedSub, error) {
 	return out, rows.Err()
 }
 
-// Item is an entry as shown in the reader.
+// Item is a feed entry. Content is sanitized HTML and only set by Store.Item.
 type Item struct {
-	ID        int64
-	FeedTitle string
-	Title     string
-	URL       string
-	Summary   string
-	Author    string
-	Content   string // sanitized HTML; only loaded by Item, not Items
-	Published time.Time
-	Read      bool
+	ID        int64     `json:"id"`
+	FeedID    int64     `json:"feed_id"`
+	FeedTitle string    `json:"feed_title"`
+	Title     string    `json:"title"`
+	URL       string    `json:"url"`
+	Summary   string    `json:"summary"`
+	Author    string    `json:"author"`
+	Content   string    `json:"content,omitempty"`
+	Published time.Time `json:"published"`
+	Read      bool      `json:"read"`
 }
 
-// itemCols is the column list; the list view substitutes ” for content so
-// article bodies aren't read until one is opened.
-const itemCols = `i.id, f.title, f.url, i.title, i.url, i.summary, i.author, %s, i.published_at,
-	       EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?)`
+// itemQuery selects items the user is subscribed to. Pass "”" as contentCol
+// for lists so article bodies are only read when one item is opened.
+func itemQuery(contentCol string) string {
+	return `SELECT i.id, i.feed_id, COALESCE(NULLIF(f.title, ''), f.url), i.title, i.url, i.summary, i.author, ` +
+		contentCol + `, i.published_at,
+		       EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?)
+		FROM items i
+		JOIN feeds f ON f.id = i.feed_id
+		JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = ?`
+}
 
-const itemFrom = `
-	FROM items i
-	JOIN feeds f ON f.id = i.feed_id
-	JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = ?`
-
-func itemSelect(withContent bool) string {
-	content := "''"
-	if withContent {
-		content = "i.content"
+func (s *Store) queryItems(ctx context.Context, query string, args ...any) ([]Item, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
 	}
-	return "SELECT " + fmt.Sprintf(itemCols, content) + itemFrom
-}
-
-func scanItems(rows *sql.Rows) ([]Item, error) {
 	defer rows.Close()
 	var out []Item
 	for rows.Next() {
 		var it Item
-		var feedTitle, feedURL string
-		var ts int64
-		if err := rows.Scan(&it.ID, &feedTitle, &feedURL, &it.Title, &it.URL, &it.Summary, &it.Author, &it.Content, &ts, &it.Read); err != nil {
+		var published int64
+		if err := rows.Scan(&it.ID, &it.FeedID, &it.FeedTitle, &it.Title, &it.URL, &it.Summary, &it.Author,
+			&it.Content, &published, &it.Read); err != nil {
 			return nil, err
 		}
-		it.FeedTitle = feedTitle
-		if it.FeedTitle == "" {
-			it.FeedTitle = feedURL
-		}
-		it.Published = time.Unix(ts, 0).UTC()
+		it.Published = time.Unix(published, 0).UTC()
 		out = append(out, it)
 	}
 	return out, rows.Err()
@@ -129,38 +116,31 @@ func scanItems(rows *sql.Rows) ([]Item, error) {
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // Items lists the user's newest items, optionally limited to one feed and/or
-// to those whose title, summary, author or feed name contain q.
+// to those whose title, summary, author or feed name contain text.
 func (s *Store) Items(ctx context.Context, userID, feedID int64, unreadOnly bool, text string, limit int) ([]Item, error) {
-	query := itemSelect(false) + ` WHERE 1=1`
+	conds := []string{"1=1"}
 	args := []any{userID, userID}
 	if feedID != 0 {
-		query += ` AND i.feed_id = ?`
+		conds = append(conds, "i.feed_id = ?")
 		args = append(args, feedID)
 	}
 	if unreadOnly {
-		query += ` AND NOT EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?)`
+		conds = append(conds, "NOT EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?)")
 		args = append(args, userID)
 	}
 	if text != "" {
 		pat := "%" + likeEscaper.Replace(text) + "%"
-		query += ` AND (i.title LIKE ? ESCAPE '\' OR i.summary LIKE ? ESCAPE '\' OR i.author LIKE ? ESCAPE '\' OR f.title LIKE ? ESCAPE '\')`
+		conds = append(conds, `(i.title LIKE ? ESCAPE '\' OR i.summary LIKE ? ESCAPE '\' OR i.author LIKE ? ESCAPE '\' OR f.title LIKE ? ESCAPE '\')`)
 		args = append(args, pat, pat, pat, pat)
 	}
-	query += ` ORDER BY i.published_at DESC, i.id DESC LIMIT ?`
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	return scanItems(rows)
+	return s.queryItems(ctx, itemQuery("''")+" WHERE "+strings.Join(conds, " AND ")+
+		" ORDER BY i.published_at DESC, i.id DESC LIMIT ?", args...)
 }
 
+// Item returns one item with its content, or sql.ErrNoRows if the user can't see it.
 func (s *Store) Item(ctx context.Context, userID, itemID int64) (Item, error) {
-	rows, err := s.db.QueryContext(ctx, itemSelect(true)+` WHERE i.id = ?`, userID, userID, itemID)
-	if err != nil {
-		return Item{}, err
-	}
-	items, err := scanItems(rows)
+	items, err := s.queryItems(ctx, itemQuery("i.content")+" WHERE i.id = ?", userID, userID, itemID)
 	if err != nil {
 		return Item{}, err
 	}
@@ -172,21 +152,22 @@ func (s *Store) Item(ctx context.Context, userID, itemID int64) (Item, error) {
 
 // MarkRead marks one item read, only if the user is subscribed to its feed.
 func (s *Store) MarkRead(ctx context.Context, userID, itemID int64) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO read_items (user_id, item_id)
-		SELECT ?, i.id FROM items i
-		JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = ?
-		WHERE i.id = ?`, userID, userID, itemID)
-	return err
+	return s.markRead(ctx, userID, "i.id", itemID)
 }
 
 // MarkFeedRead marks every item in a subscribed feed read.
 func (s *Store) MarkFeedRead(ctx context.Context, userID, feedID int64) error {
+	return s.markRead(ctx, userID, "i.feed_id", feedID)
+}
+
+// markRead marks items read where the items column named by match equals id.
+// match is always a constant from this file, never user input.
+func (s *Store) markRead(ctx context.Context, userID int64, match string, id int64) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO read_items (user_id, item_id)
 		SELECT ?, i.id FROM items i
 		JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = ?
-		WHERE i.feed_id = ?`, userID, userID, feedID)
+		WHERE `+match+` = ?`, userID, userID, id)
 	return err
 }
 
@@ -275,6 +256,53 @@ func (s *Store) RefreshUserFeeds(ctx context.Context, userID int64) error {
 		UPDATE feeds SET next_fetch_at = ?
 		WHERE id IN (SELECT feed_id FROM subscriptions WHERE user_id = ?)`, time.Now().Unix(), userID)
 	return err
+}
+
+// IconTarget is a feed whose icon should be (re)fetched.
+type IconTarget struct {
+	ID      int64
+	URL     string // the feed address, used when the feed names no site
+	SiteURL string
+}
+
+// IconsDue returns feeds whose icon was last checked before cutoff.
+func (s *Store) IconsDue(ctx context.Context, cutoff time.Time, limit int) ([]IconTarget, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, url, site_url FROM feeds WHERE icon_checked_at < ? ORDER BY icon_checked_at LIMIT ?`,
+		cutoff.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []IconTarget
+	for rows.Next() {
+		var t IconTarget
+		if err := rows.Scan(&t.ID, &t.URL, &t.SiteURL); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SaveIcon records an icon check. Empty data keeps any icon already stored.
+func (s *Store) SaveIcon(ctx context.Context, feedID int64, data []byte, contentType string, checked time.Time) error {
+	if len(data) == 0 {
+		_, err := s.db.ExecContext(ctx, `UPDATE feeds SET icon_checked_at = ? WHERE id = ?`, checked.Unix(), feedID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE feeds SET icon = ?, icon_type = ?, icon_checked_at = ? WHERE id = ?`,
+		data, contentType, checked.Unix(), feedID)
+	return err
+}
+
+// FeedIcon returns a feed's icon, or sql.ErrNoRows if it has none.
+func (s *Store) FeedIcon(ctx context.Context, feedID int64) ([]byte, string, error) {
+	var data []byte
+	var ct string
+	err := s.db.QueryRowContext(ctx, `SELECT icon, icon_type FROM feeds WHERE id = ? AND icon IS NOT NULL`, feedID).Scan(&data, &ct)
+	return data, ct, err
 }
 
 // NewItem is a parsed entry ready to insert.

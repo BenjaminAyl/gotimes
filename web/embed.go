@@ -1,7 +1,7 @@
-// Package web embeds the HTML templates and static assets.
+// Package web embeds the single-page frontend.
 package web
 
 import "embed"
 
-//go:embed templates static
+//go:embed index.html assets
 var FS embed.FS

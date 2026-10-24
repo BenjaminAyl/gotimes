@@ -2,6 +2,7 @@
 package feeds
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"syscall"
@@ -18,17 +20,18 @@ import (
 
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/mmcdole/gofeed"
+	xhtml "golang.org/x/net/html"
 
-	"github.com/benaylward/gotimes/internal/store"
+	"github.com/benaylward/rss/internal/store"
 )
 
 const (
-	maxBody      = 5 << 20
+	maxBody      = 20 << 20
 	maxSummary   = 500
 	maxContent   = 200 << 10
 	fetchTimeout = 15 * time.Second
 	maxRedirects = 5
-	userAgent    = "gotimes/0.1 (+rss reader)"
+	userAgent    = "rss/0.1 (+rss reader)"
 )
 
 // Fetcher downloads and parses feeds.
@@ -104,8 +107,15 @@ func (f *Fetcher) fetch(ctx context.Context, st store.FeedState, res *store.Fetc
 		return fmt.Errorf("unexpected status %s", resp.Status)
 	}
 
-	parsed, err := gofeed.NewParser().Parse(io.LimitReader(resp.Body, maxBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
+		return err
+	}
+	parsed, err := gofeed.NewParser().Parse(bytes.NewReader(body))
+	if err != nil {
+		if links := alternateLinks(body, st.URL); len(links) > 0 {
+			return &notFeedError{links: links, err: err}
+		}
 		return fmt.Errorf("parse feed: %w", err)
 	}
 
@@ -119,6 +129,96 @@ func (f *Fetcher) fetch(ctx context.Context, st store.FeedState, res *store.Fetc
 		res.Items = append(res.Items, toItem(it, now))
 	}
 	return nil
+}
+
+// notFeedError means the URL is a web page that advertises feeds elsewhere.
+type notFeedError struct {
+	links []string
+	err   error
+}
+
+func (e *notFeedError) Error() string {
+	return "not a feed, but the page links to one: " + e.err.Error()
+}
+func (e *notFeedError) Unwrap() error { return e.err }
+
+// linkTag is a <link> element from a page's head.
+type linkTag struct{ rel, typ, href string }
+
+// linkTags lists the <link> elements of an HTML page.
+func linkTags(page []byte) []linkTag {
+	doc, err := xhtml.Parse(bytes.NewReader(page[:min(len(page), 1<<20)]))
+	if err != nil {
+		return nil
+	}
+	var out []linkTag
+	var walk func(*xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		if n.Type == xhtml.ElementNode && n.Data == "link" {
+			var l linkTag
+			for _, a := range n.Attr {
+				switch a.Key {
+				case "rel":
+					l.rel = strings.ToLower(a.Val)
+				case "type":
+					l.typ = strings.ToLower(a.Val)
+				case "href":
+					l.href = a.Val
+				}
+			}
+			if l.href != "" {
+				out = append(out, l)
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return out
+}
+
+// resolve turns an href found on a page into an absolute URL.
+func resolve(pageURL, href string) (string, bool) {
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		return "", false
+	}
+	u, err := base.Parse(href)
+	if err != nil {
+		return "", false
+	}
+	return u.String(), true
+}
+
+// alternateLinks returns the RSS/Atom feeds an HTML page advertises with
+// <link rel="alternate">, resolved against pageURL.
+func alternateLinks(page []byte, pageURL string) []string {
+	var out []string
+	for _, l := range linkTags(page) {
+		if strings.Contains(l.rel, "alternate") && (l.typ == "application/rss+xml" || l.typ == "application/atom+xml") {
+			if u, ok := resolve(pageURL, l.href); ok {
+				out = append(out, u)
+			}
+		}
+	}
+	return out
+}
+
+// Discover fetches a URL the user typed. If it is a web page rather than a
+// feed, it follows the feeds the page advertises. It returns the URL of the
+// feed that was actually read.
+func (f *Fetcher) Discover(ctx context.Context, st store.FeedState) (string, store.FetchResult) {
+	res := f.Fetch(ctx, st)
+	var nf *notFeedError
+	if errors.As(res.Err, &nf) {
+		for _, link := range nf.links[:min(len(nf.links), 3)] {
+			if r := f.Fetch(ctx, store.FeedState{URL: link}); r.Err == nil {
+				return link, r
+			}
+		}
+	}
+	return st.URL, res
 }
 
 func toItem(it *gofeed.Item, now time.Time) store.NewItem {

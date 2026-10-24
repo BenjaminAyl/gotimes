@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/benaylward/gotimes/internal/db"
-	"github.com/benaylward/gotimes/internal/feeds"
-	"github.com/benaylward/gotimes/internal/server"
-	"github.com/benaylward/gotimes/internal/store"
-	"github.com/benaylward/gotimes/web"
+	"github.com/benaylward/rss/internal/db"
+	"github.com/benaylward/rss/internal/feeds"
+	"github.com/benaylward/rss/internal/server"
+	"github.com/benaylward/rss/internal/store"
+	"github.com/benaylward/rss/web"
 )
 
 const fetchWorkers = 8
@@ -41,7 +41,7 @@ func run(addr string) error {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return err
 	}
-	conn, err := db.Open(filepath.Join(dataDir, "gotimes.db"))
+	conn, err := db.Open(filepath.Join(dataDir, "rss.db"))
 	if err != nil {
 		return err
 	}

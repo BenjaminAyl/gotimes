@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/benaylward/gotimes/internal/store"
+	"github.com/benaylward/rss/internal/store"
 )
 
 const (
@@ -16,6 +16,7 @@ const (
 	refreshEvery = 30 * time.Minute // normal per-feed interval
 	maxBackoff   = 24 * time.Hour
 	batchSize    = 200
+	iconBatch    = 10 // icons fetched per sweep
 )
 
 // Scheduler polls due feeds concurrently with a bounded worker pool.
@@ -23,20 +24,11 @@ type Scheduler struct {
 	store   *store.Store
 	fetcher *Fetcher
 	workers int
-	kick    chan struct{}
 	runMu   sync.Mutex // one sweep at a time, so a manual refresh can't double-fetch
 }
 
 func NewScheduler(s *store.Store, f *Fetcher, workers int) *Scheduler {
-	return &Scheduler{store: s, fetcher: f, workers: workers, kick: make(chan struct{}, 1)}
-}
-
-// Kick asks the scheduler to look for due feeds now (non-blocking).
-func (s *Scheduler) Kick() {
-	select {
-	case s.kick <- struct{}{}:
-	default:
-	}
+	return &Scheduler{store: s, fetcher: f, workers: workers}
 }
 
 // Run blocks until ctx is cancelled.
@@ -49,12 +41,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-		case <-s.kick:
 		}
 	}
 }
 
-// RefreshNow fetches everything that's due and returns when done.
+// RefreshNow fetches every due feed and returns when done.
 func (s *Scheduler) RefreshNow(ctx context.Context) { s.runOnce(ctx) }
 
 func (s *Scheduler) runOnce(ctx context.Context) {
@@ -67,14 +58,32 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 		}
 		return
 	}
-	if len(due) == 0 {
-		return
-	}
 	var g errgroup.Group
 	g.SetLimit(s.workers)
 	for _, st := range due {
 		g.Go(func() error {
 			s.refresh(ctx, st)
+			return nil
+		})
+	}
+	g.Wait()
+	s.fillIcons(ctx)
+}
+
+// fillIcons fetches icons for feeds that have none yet or are due a recheck.
+func (s *Scheduler) fillIcons(ctx context.Context) {
+	targets, err := s.store.IconsDue(ctx, time.Now().Add(-iconRecheck), iconBatch)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("scheduler: list icons due: %v", err)
+		}
+		return
+	}
+	var g errgroup.Group
+	g.SetLimit(s.workers)
+	for _, t := range targets {
+		g.Go(func() error {
+			FillIcon(ctx, s.store, s.fetcher, t)
 			return nil
 		})
 	}
