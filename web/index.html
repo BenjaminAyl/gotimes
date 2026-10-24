@@ -52,6 +52,25 @@
   </form>
 </dialog>
 
+<dialog id="feed-edit" aria-labelledby="feed-edit-title">
+  <form id="feed-edit-form" method="dialog">
+    <h2 id="feed-edit-title">Edit feed</h2>
+    <input type="text" id="feed-name" placeholder="Name" aria-label="Feed name" maxlength="100" autocomplete="off" spellcheck="false">
+    <div class="icon-edit">
+      <span class="icon-preview" id="feed-icon-preview"></span>
+      <button type="button" class="text-btn" id="feed-icon-pick">Upload image</button>
+      <button type="button" class="text-btn" id="feed-icon-reset" hidden>Use the site's icon</button>
+      <input type="file" id="feed-icon-file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.svg,.ico" hidden>
+    </div>
+    <p class="hint">PNG, JPEG, WebP, GIF or SVG. Large images are shrunk.</p>
+    <p class="error" id="feed-edit-error" role="alert"></p>
+    <div class="actions">
+      <button type="button" class="text-btn" id="feed-edit-cancel">Cancel</button>
+      <button type="submit" class="solid-btn" id="feed-edit-submit">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="cat" aria-labelledby="cat-title">
   <form id="cat-form" method="dialog">
     <h2 id="cat-title">New category</h2>

@@ -157,3 +157,37 @@ func TestIconFallsBackToFeedLogoThenService(t *testing.T) {
 		t.Fatalf("service fallback ct=%q", ct)
 	}
 }
+
+func TestHTMLWithoutFeedLinksGivesAClearError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte("<html><body>Checking your browser...</body></html>"))
+	}))
+	defer srv.Close()
+	_, res := NewFetcher(true).Discover(context.Background(), store.FeedState{URL: srv.URL})
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "returned a web page") {
+		t.Fatalf("err = %v", res.Err)
+	}
+}
+
+func TestAtomFeedWithoutSiteLinkFindsIconOnItsHost(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/blog/feed.atom", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`<feed xmlns="http://www.w3.org/2005/Atom"><title>Blog</title><link rel="self" href="/blog/feed.atom"/><entry><title>One</title><id>1</id></entry></feed>`))
+	})
+	mux.HandleFunc("/i.png", func(w http.ResponseWriter, _ *http.Request) { w.Write(tinyPNG) })
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`<html><head><link rel="icon" href="/i.png"></head></html>`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	f := NewFetcher(true)
+	res := f.Fetch(context.Background(), store.FeedState{URL: srv.URL + "/blog/feed.atom"})
+	if res.Err != nil || res.SiteURL != srv.URL+"/" {
+		t.Fatalf("err=%v site=%q", res.Err, res.SiteURL)
+	}
+	if _, ct := f.Icon(context.Background(), res.SiteURL, ""); ct != "image/png" {
+		t.Fatalf("ct=%q", ct)
+	}
+}

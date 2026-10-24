@@ -284,3 +284,91 @@ func TestCategories(t *testing.T) {
 		t.Fatalf("after delete = %s", w.Body)
 	}
 }
+
+func TestRenameAndCustomIcon(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(sampleFeed)) }))
+	defer feed.Close()
+	h := newTestServer(t, "me@example.com")
+	hdr := map[string]string{clientHeader: "test"}
+	w := do(h, "POST", "/api/feeds", `{"url":"`+feed.URL+`"}`, hdr)
+	var added struct{ ID int64 }
+	json.Unmarshal(w.Body.Bytes(), &added)
+	fid := itoa(added.ID)
+
+	list := func() store.FeedSub {
+		var fl struct{ Feeds []store.FeedSub }
+		json.Unmarshal(do(h, "GET", "/api/feeds", "", nil).Body.Bytes(), &fl)
+		return fl.Feeds[0]
+	}
+	if f := list(); f.Title != "Desk" || f.SiteTitle != "Desk" || f.Custom {
+		t.Fatalf("before = %+v", f)
+	}
+
+	// rename: shown everywhere, the feed's own title is kept alongside
+	if w := do(h, "PATCH", "/api/feeds/"+fid, `{"title":"  My desk  "}`, hdr); w.Code != 204 {
+		t.Fatalf("rename = %d %s", w.Code, w.Body)
+	}
+	if f := list(); f.Title != "My desk" || f.SiteTitle != "Desk" {
+		t.Fatalf("renamed = %+v", f)
+	}
+	if w := do(h, "GET", "/api/items", "", nil); !strings.Contains(w.Body.String(), `"feed_title":"My desk"`) {
+		t.Fatalf("items don't use the new name: %s", w.Body)
+	}
+	if w := do(h, "GET", "/api/items?q=my+desk", "", nil); !strings.Contains(w.Body.String(), `"Hello"`) {
+		t.Fatalf("search by new name: %s", w.Body)
+	}
+	if w := do(h, "PATCH", "/api/feeds/"+fid, `{"title":""}`, hdr); w.Code != 204 {
+		t.Fatalf("reset name = %d", w.Code)
+	}
+	if f := list(); f.Title != "Desk" {
+		t.Fatalf("reset = %+v", f)
+	}
+	if w := do(h, "PATCH", "/api/feeds/9999", `{"title":"x"}`, hdr); w.Code != 404 {
+		t.Fatalf("rename missing = %d", w.Code)
+	}
+
+	// upload: PNG by its bytes, SVG only when it says so and looks like one, HTML never
+	png := "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+	put := func(body, ctype string) int {
+		return do(h, "PUT", "/api/feeds/"+fid+"/icon", body, map[string]string{clientHeader: "t", "Content-Type": ctype}).Code
+	}
+	if c := put("<html><script>alert(1)</script></html>", "image/png"); c != 415 {
+		t.Fatalf("html as png = %d, want 415", c)
+	}
+	if c := put("<html></html>", "image/svg+xml"); c != 415 {
+		t.Fatalf("html as svg = %d, want 415", c)
+	}
+	if c := put(strings.Repeat("x", maxIconUpload+10), "image/png"); c != 413 {
+		t.Fatalf("huge = %d, want 413", c)
+	}
+	if c := put(png, "image/png"); c != 204 {
+		t.Fatalf("png = %d", c)
+	}
+	f := list()
+	if !f.Custom || f.IconV == 0 {
+		t.Fatalf("after upload = %+v", f)
+	}
+	icon := do(h, "GET", "/api/feeds/"+fid+"/icon", "", nil)
+	if icon.Code != 200 || icon.Header().Get("Content-Type") != "image/png" || icon.Body.String() != png {
+		t.Fatalf("icon = %d %q", icon.Code, icon.Header().Get("Content-Type"))
+	}
+	if c := put(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>`, "image/svg+xml"); c != 204 {
+		t.Fatalf("svg = %d", c)
+	}
+	if ct := do(h, "GET", "/api/feeds/"+fid+"/icon", "", nil).Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Fatalf("svg served as %q", ct)
+	}
+
+	// another user doesn't see my icon or name, and can't change them
+	other := map[string]string{accessEmailHeader: "other@example.com", clientHeader: "t"}
+	if w := do(h, "PUT", "/api/feeds/"+fid+"/icon", png, other); w.Code != 404 {
+		t.Fatalf("other user upload = %d, want 404", w.Code)
+	}
+
+	if w := do(h, "DELETE", "/api/feeds/"+fid+"/icon", "", hdr); w.Code != 204 {
+		t.Fatalf("clear = %d", w.Code)
+	}
+	if f := list(); f.Custom {
+		t.Fatalf("still custom: %+v", f)
+	}
+}

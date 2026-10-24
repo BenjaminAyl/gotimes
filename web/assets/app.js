@@ -159,8 +159,7 @@ function catIcon(c) {
   return el;
 }
 
-// The main views, plus a row of icons for pinned categories and feeds, and for
-// whatever feed or category is open if it isn't pinned.
+// The main views, plus a row of icons for pinned categories and feeds.
 function renderTabs() {
   tabsEl.replaceChildren(
     tabButton("unread", "Unread", state.totalUnread ? span("n", state.totalUnread) : null),
@@ -178,13 +177,6 @@ function pinEntries() {
   const addFeed = (f) => add("feed:" + f.id, feedName(f), feedIcon(f.id), f.unread);
   state.categories.filter((c) => c.pinned).forEach(addCat);
   state.feeds.filter((f) => f.pinned).forEach(addFeed);
-  if (!entries.some((e) => e.tab === state.tab)) {
-    const [kind, id] = state.tab.split(":");
-    const c = kind === "cat" && catOf(Number(id));
-    const f = kind === "feed" && feedOf(Number(id));
-    if (c) addCat(c);
-    else if (f) addFeed(f);
-  }
   return entries;
 }
 
@@ -344,6 +336,7 @@ function feedRow(f) {
   tools.append(
     iconButton("pin", f.pinned ? "Unpin" : "Pin to the icon row", "pin", f.pinned),
     iconButton("folder", "Move to a category", "move"),
+    iconButton("edit", "Rename or change icon", "edit-feed"),
     iconButton("check", "Mark all read", "read"),
     iconButton("x", "Remove feed", "remove"),
   );
@@ -432,6 +425,103 @@ function openMenu(anchor, entries) {
 }
 document.addEventListener("click", (e) => { if (menuEl && !menuEl.contains(e.target) && !e.target.closest('[data-action="move"]')) closeMenu(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+
+// ---- feed dialog: rename and change the icon ----
+
+const feedDialog = $("feed-edit");
+const feedNameInput = $("feed-name");
+const feedPreview = $("feed-icon-preview");
+const feedFile = $("feed-icon-file");
+const feedError = $("feed-edit-error");
+const feedSubmit = $("feed-edit-submit");
+const MAX_ICON = 256 * 1024;
+let feedEditing = null; // { id, file: Blob | null, reset: boolean }
+
+function openFeedDialog(f) {
+  feedEditing = { id: f.id, file: null, reset: false };
+  feedNameInput.value = f.title === f.site_title ? "" : f.title; // empty means "use the feed's own name"
+  feedNameInput.placeholder = f.site_title || f.url;
+  feedError.textContent = "";
+  feedFile.value = "";
+  feedPreview.replaceChildren(feedIcon(f.id));
+  $("feed-icon-reset").hidden = !f.custom_icon;
+  feedDialog.showModal();
+  feedNameInput.focus();
+}
+
+// Rasters are shrunk to a small square-ish PNG; SVGs are sent as they are.
+async function prepareIcon(file) {
+  if (file.type === "image/svg+xml" || file.name.endsWith(".svg")) {
+    return new Blob([await file.arrayBuffer()], { type: "image/svg+xml" });
+  }
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 96 / Math.max(bmp.width, bmp.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bmp.width * scale));
+    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    return await new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("couldn't read that image"))), "image/png"));
+  } catch {
+    return file; // e.g. .ico, which the browser can't draw to a canvas: send as is
+  }
+}
+
+$("feed-icon-pick").addEventListener("click", () => feedFile.click());
+feedFile.addEventListener("change", async () => {
+  const file = feedFile.files[0];
+  if (!file) return;
+  feedError.textContent = "";
+  const blob = await prepareIcon(file);
+  if (blob.size > MAX_ICON) {
+    feedFile.value = "";
+    feedError.textContent = "That image is too large (256KB max).";
+    return;
+  }
+  feedEditing.file = blob;
+  feedEditing.reset = false;
+  const img = document.createElement("img");
+  img.className = "fav";
+  img.alt = "";
+  img.dataset.name = feedNameInput.value || feedNameInput.placeholder;
+  img.src = URL.createObjectURL(blob);
+  feedPreview.replaceChildren(img);
+});
+$("feed-icon-reset").addEventListener("click", () => {
+  feedEditing.file = null;
+  feedEditing.reset = true;
+  feedFile.value = "";
+  $("feed-icon-reset").hidden = true;
+  feedPreview.replaceChildren(letterIcon(feedNameInput.value || feedNameInput.placeholder));
+});
+$("feed-edit-cancel").addEventListener("click", () => feedDialog.close());
+feedDialog.addEventListener("click", (e) => { if (e.target === feedDialog) feedDialog.close(); });
+
+$("feed-edit-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  feedError.textContent = "";
+  feedSubmit.disabled = true;
+  const { id, file, reset } = feedEditing;
+  try {
+    await api("PATCH", `/feeds/${id}`, { title: feedNameInput.value.trim() });
+    if (file) {
+      const res = await fetch(`/api/feeds/${id}/icon`, { method: "PUT", headers: { "X-Requested-With": "rss", "Content-Type": file.type || "image/png" }, body: file });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    } else if (reset) {
+      await api("DELETE", `/feeds/${id}/icon`);
+    }
+    feedDialog.close();
+    articles.clear(); // cached articles carry the old feed name
+    await afterFeedChange();
+    renderTabs();
+    if (state.tab === "feeds") renderFeeds();
+    else show();
+  } catch (err) {
+    feedError.textContent = err.message;
+  } finally {
+    feedSubmit.disabled = false;
+  }
+});
 
 // ---- category dialog ----
 
@@ -531,6 +621,7 @@ listEl.addEventListener("click", async (e) => {
     switch (action) {
       case "open": return setTab((catRowEl ? "cat:" : "feed:") + id);
       case "edit": return openCategoryDialog(c);
+      case "edit-feed": return openFeedDialog(f);
       case "move":
         return openMenu(btn, [
           { label: "No category", checked: !f.category_id, pick: () => moveFeed(id, 0) },

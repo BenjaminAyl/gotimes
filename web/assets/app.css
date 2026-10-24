@@ -349,7 +349,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .prose hr { border: 0; border-block-start: 1px solid var(--rule); }
 .prose table { inline-size: 100%; border-collapse: collapse; font-size: 0.9em; }
 .prose th, .prose td { padding: var(--s1) var(--s2); border: 1px solid var(--rule); }
-.source { margin-block-start: var(--s5); padding-block-start: var(--s4); border-block-start: 1px solid var(--rule); font-size: 0.82rem; letter-spacing: 0.06em; }
+.source { display: block; margin-block-start: var(--s5); padding-block-start: var(--s4); border-block-start: 1px solid var(--rule); font-size: 0.82rem; letter-spacing: 0.06em; }
 .source a { color: var(--ink-soft); text-decoration: none; }
 .source a:hover { color: var(--red); }
 
@@ -398,6 +398,10 @@ dialog input:focus { outline: none; border-block-end-color: var(--red); }
 .icon-choice:hover { background: var(--raised); }
 .icon-choice[aria-pressed="true"] { color: var(--ink); background: var(--selected); border-color: var(--rule); }
 .icon-choice .cat-icon { inline-size: 20px; block-size: 20px; }
+.icon-edit { display: flex; align-items: center; gap: var(--s3); margin-block-start: var(--s4); }
+.icon-preview { display: grid; place-items: center; inline-size: 40px; block-size: 40px; border: 1px solid var(--rule); border-radius: 4px; }
+.icon-preview .fav { inline-size: 28px; block-size: 28px; font-size: 14px; }
+.hint { margin-block-start: var(--s2); font-size: 0.75rem; color: var(--ink-faint); }
 .error { min-block-size: 1.5em; margin-block-start: var(--s2); font-size: 0.8rem; color: var(--red-deep); }
 .actions { display: flex; justify-content: flex-end; gap: var(--s3); margin-block-start: var(--s3); }
 .text-btn { padding: var(--s1) var(--s2); font-size: 0.85rem; color: var(--ink-faint); }

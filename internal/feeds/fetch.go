@@ -121,11 +121,17 @@ func (f *Fetcher) fetch(ctx context.Context, st store.FeedState, res *store.Fetc
 		if links := alternateLinks(body, st.URL); len(links) > 0 {
 			return &notFeedError{links: links, err: err}
 		}
+		if strings.Contains(resp.Header.Get("Content-Type"), "html") {
+			return errors.New("that address returned a web page, not a feed (the site may block feed readers)")
+		}
 		return fmt.Errorf("parse feed: %w", err)
 	}
 
 	res.Title = strings.TrimSpace(parsed.Title)
 	res.SiteURL = parsed.Link
+	if res.SiteURL == "" { // Atom feeds often omit it; the feed's own host is the best guess
+		res.SiteURL = resp.Request.URL.Scheme + "://" + resp.Request.URL.Host + "/"
+	}
 	if parsed.Image != nil {
 		res.ImageURL = parsed.Image.URL
 	}

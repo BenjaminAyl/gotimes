@@ -34,25 +34,34 @@ func (s *Store) UserID(ctx context.Context, email string) (int64, error) {
 // FeedSub is a feed in a user's subscription list.
 type FeedSub struct {
 	ID        int64  `json:"id"`
-	Title     string `json:"title"`
+	Title     string `json:"title"`      // what to show: your name for it, else the feed's own
+	SiteTitle string `json:"site_title"` // the feed's own title
 	URL       string `json:"url"`
 	LastError string `json:"last_error"`
 	Unread    int    `json:"unread"`
 	Pinned    bool   `json:"pinned"`
 	Category  int64  `json:"category_id"` // 0 = not filed
 	IconV     int64  `json:"icon_v"`      // 0 = no icon; otherwise a version for /api/feeds/{id}/icon?v=
+	Custom    bool   `json:"custom_icon"` // the icon is one you uploaded
 }
+
+// feedTitle is a feed's display name for the subscription alias s: your own
+// name for it, else the feed's title, else its address.
+const feedTitle = `COALESCE(NULLIF(s.custom_title, ''), NULLIF(f.title, ''), f.url)`
 
 func (s *Store) Feeds(ctx context.Context, userID int64) ([]FeedSub, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT f.id, f.title, f.url, f.last_error, s.pinned, COALESCE(s.category_id, 0),
-		       CASE WHEN f.icon IS NULL THEN 0 ELSE f.icon_checked_at END,
+		SELECT f.id, COALESCE(NULLIF(s.custom_title, ''), f.title), f.title, f.url, f.last_error, s.pinned,
+		       COALESCE(s.category_id, 0),
+		       CASE WHEN s.custom_icon IS NOT NULL THEN s.custom_icon_v
+		            WHEN f.icon IS NULL THEN 0 ELSE f.icon_checked_at END,
+		       s.custom_icon IS NOT NULL,
 		       (SELECT COUNT(*) FROM items i
 		         WHERE i.feed_id = f.id
 		           AND NOT EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?))
 		FROM feeds f JOIN subscriptions s ON s.feed_id = f.id
 		WHERE s.user_id = ?
-		ORDER BY s.pinned DESC, lower(COALESCE(NULLIF(f.title, ''), f.url))`, userID, userID)
+		ORDER BY s.pinned DESC, lower(`+feedTitle+`)`, userID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +69,7 @@ func (s *Store) Feeds(ctx context.Context, userID int64) ([]FeedSub, error) {
 	var out []FeedSub
 	for rows.Next() {
 		var f FeedSub
-		if err := rows.Scan(&f.ID, &f.Title, &f.URL, &f.LastError, &f.Pinned, &f.Category, &f.IconV, &f.Unread); err != nil {
+		if err := rows.Scan(&f.ID, &f.Title, &f.SiteTitle, &f.URL, &f.LastError, &f.Pinned, &f.Category, &f.IconV, &f.Custom, &f.Unread); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -85,7 +94,7 @@ type Item struct {
 // itemQuery selects items the user is subscribed to. Pass "”" as contentCol
 // for lists so article bodies are only read when one item is opened.
 func itemQuery(contentCol string) string {
-	return `SELECT i.id, i.feed_id, COALESCE(NULLIF(f.title, ''), f.url), i.title, i.url, i.summary, i.author, ` +
+	return `SELECT i.id, i.feed_id, ` + feedTitle + `, i.title, i.url, i.summary, i.author, ` +
 		contentCol + `, i.published_at,
 		       EXISTS (SELECT 1 FROM read_items r WHERE r.item_id = i.id AND r.user_id = ?)
 		FROM items i
@@ -143,7 +152,7 @@ func (s *Store) Items(ctx context.Context, userID int64, f ItemFilter) ([]Item, 
 	}
 	if f.Text != "" {
 		pat := "%" + likeEscaper.Replace(f.Text) + "%"
-		conds = append(conds, `(i.title LIKE ? ESCAPE '\' OR i.summary LIKE ? ESCAPE '\' OR i.author LIKE ? ESCAPE '\' OR f.title LIKE ? ESCAPE '\')`)
+		conds = append(conds, `(i.title LIKE ? ESCAPE '\' OR i.summary LIKE ? ESCAPE '\' OR i.author LIKE ? ESCAPE '\' OR `+feedTitle+` LIKE ? ESCAPE '\')`)
 		args = append(args, pat, pat, pat, pat)
 	}
 	args = append(args, f.Limit)
@@ -311,12 +320,47 @@ func (s *Store) SaveIcon(ctx context.Context, feedID int64, data []byte, content
 	return err
 }
 
-// FeedIcon returns a feed's icon, or sql.ErrNoRows if it has none.
-func (s *Store) FeedIcon(ctx context.Context, feedID int64) ([]byte, string, error) {
+// FeedIcon returns the icon the user sees for a feed: the one they uploaded,
+// else the site's. It returns sql.ErrNoRows if there is neither.
+func (s *Store) FeedIcon(ctx context.Context, userID, feedID int64) ([]byte, string, error) {
 	var data []byte
 	var ct string
-	err := s.db.QueryRowContext(ctx, `SELECT icon, icon_type FROM feeds WHERE id = ? AND icon IS NOT NULL`, feedID).Scan(&data, &ct)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(s.custom_icon, f.icon), CASE WHEN s.custom_icon IS NOT NULL THEN s.custom_icon_type ELSE f.icon_type END
+		FROM feeds f JOIN subscriptions s ON s.feed_id = f.id AND s.user_id = ?
+		WHERE f.id = ? AND COALESCE(s.custom_icon, f.icon) IS NOT NULL`, userID, feedID).Scan(&data, &ct)
 	return data, ct, err
+}
+
+// RenameFeed sets the user's own name for a feed; an empty title goes back to the feed's own.
+func (s *Store) RenameFeed(ctx context.Context, userID, feedID int64, title string) error {
+	return s.updateSub(ctx, `UPDATE subscriptions SET custom_title = ? WHERE user_id = ? AND feed_id = ?`, title, userID, feedID)
+}
+
+// SetCustomIcon stores an icon the user uploaded for a feed.
+func (s *Store) SetCustomIcon(ctx context.Context, userID, feedID int64, data []byte, contentType string) error {
+	return s.updateSub(ctx,
+		`UPDATE subscriptions SET custom_icon = ?, custom_icon_type = ?, custom_icon_v = ? WHERE user_id = ? AND feed_id = ?`,
+		data, contentType, time.Now().UnixMicro(), userID, feedID)
+}
+
+// ClearCustomIcon goes back to the site's own icon.
+func (s *Store) ClearCustomIcon(ctx context.Context, userID, feedID int64) error {
+	return s.updateSub(ctx,
+		`UPDATE subscriptions SET custom_icon = NULL, custom_icon_type = '', custom_icon_v = 0 WHERE user_id = ? AND feed_id = ?`,
+		userID, feedID)
+}
+
+// updateSub runs an UPDATE on one subscription, returning sql.ErrNoRows if the user isn't subscribed.
+func (s *Store) updateSub(ctx context.Context, query string, args ...any) error {
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // NewItem is a parsed entry ready to insert.

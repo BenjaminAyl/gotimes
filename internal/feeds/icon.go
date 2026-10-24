@@ -20,33 +20,34 @@ const (
 	iconRetryWait = time.Hour // after a failed check, try again sooner than a week
 )
 
-// get downloads a URL through the guarded client. A body longer than limit is
-// cut off if truncate is set (enough for a page's head), otherwise it's an error.
-func (f *Fetcher) get(ctx context.Context, u string, limit int64, truncate bool) ([]byte, http.Header, error) {
+// get downloads a URL through the guarded client and also returns the URL it
+// ended up at after redirects. A body longer than limit is cut off if truncate
+// is set (enough for a page's head), otherwise it's an error.
+func (f *Fetcher) get(ctx context.Context, u string, limit int64, truncate bool) ([]byte, http.Header, *url.URL, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, &statusError{resp.Status}
+		return nil, nil, nil, &statusError{resp.Status}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if int64(len(b)) > limit {
 		if !truncate {
-			return nil, nil, errTooBig
+			return nil, nil, nil, errTooBig
 		}
 		b = b[:limit]
 	}
-	return b, resp.Header, nil
+	return b, resp.Header, resp.Request.URL, nil
 }
 
 type statusError struct{ status string }
@@ -64,8 +65,10 @@ func (f *Fetcher) Icon(ctx context.Context, pageURL, imageURL string) ([]byte, s
 		return nil, ""
 	}
 	var candidates []string
-	if page, _, err := f.get(ctx, pageURL, maxIconPage, true); err == nil {
-		candidates = iconLinks(page, pageURL)
+	// resolve links against where the page ended up, not where we asked: a site may redirect to another host
+	if page, _, final, err := f.get(ctx, pageURL, maxIconPage, true); err == nil {
+		base = final
+		candidates = iconLinks(page, final.String())
 	}
 	candidates = append(candidates[:min(len(candidates), 3)], base.Scheme+"://"+base.Host+"/favicon.ico")
 	if u, ok := resolve(pageURL, imageURL); ok && imageURL != "" {
@@ -84,7 +87,7 @@ func (f *Fetcher) Icon(ctx context.Context, pageURL, imageURL string) ([]byte, s
 
 // fetchImage downloads one candidate icon, or returns nil if it isn't an image.
 func (f *Fetcher) fetchImage(ctx context.Context, u string) ([]byte, string) {
-	b, hdr, err := f.get(ctx, u, maxIcon, false)
+	b, hdr, _, err := f.get(ctx, u, maxIcon, false)
 	if err != nil || len(b) == 0 {
 		return nil, ""
 	}

@@ -2,10 +2,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -63,7 +65,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/feeds/{id}/read", s.auth(s.action(s.store.MarkFeedRead)))
 	mux.Handle("POST /api/feeds/{id}/pin", s.auth(s.action(s.store.TogglePin)))
 	mux.Handle("PUT /api/feeds/{id}/category", s.auth(s.setFeedCategory))
+	mux.Handle("PATCH /api/feeds/{id}", s.auth(s.renameFeed))
 	mux.Handle("GET /api/feeds/{id}/icon", s.auth(s.feedIcon))
+	mux.Handle("PUT /api/feeds/{id}/icon", s.auth(s.uploadFeedIcon))
+	mux.Handle("DELETE /api/feeds/{id}/icon", s.auth(s.action(s.store.ClearCustomIcon)))
 	mux.Handle("POST /api/categories", s.auth(s.createCategory))
 	mux.Handle("PATCH /api/categories/{id}", s.auth(s.updateCategory))
 	mux.Handle("DELETE /api/categories/{id}", s.auth(s.action(s.store.DeleteCategory)))
@@ -84,7 +89,7 @@ func secure(next http.Handler) http.Handler {
 		h := w.Header()
 		// Feed HTML is sanitized, and this policy keeps it inert anyway: only our own script and styles run.
 		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; "+
-			"img-src * data:; media-src *; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+			"img-src * data: blob:; media-src *; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
@@ -163,11 +168,7 @@ func (s *Server) action(do func(ctx context.Context, userID, id int64) error) fu
 		if !ok {
 			return
 		}
-		if err := do(r.Context(), uid, id); err != nil {
-			s.fail(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+		s.finish(w, do(r.Context(), uid, id))
 	}
 }
 
@@ -239,12 +240,12 @@ func (s *Server) addFeed(w http.ResponseWriter, r *http.Request, uid int64) {
 }
 
 // GET /api/feeds/{id}/icon: the feed's icon. URLs carry ?v= (see FeedSub.IconV), so they never change.
-func (s *Server) feedIcon(w http.ResponseWriter, r *http.Request, _ int64) {
+func (s *Server) feedIcon(w http.ResponseWriter, r *http.Request, uid int64) {
 	id, ok := pathID(w, r)
 	if !ok {
 		return
 	}
-	data, ct, err := s.store.FeedIcon(r.Context(), id)
+	data, ct, err := s.store.FeedIcon(r.Context(), uid, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "no icon")
 		return
@@ -385,6 +386,77 @@ func (s *Server) setFeedCategory(w http.ResponseWriter, r *http.Request, uid int
 	err := s.store.SetFeedCategory(r.Context(), uid, id, body.CategoryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "no such feed or category")
+		return
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+const (
+	maxFeedName   = 100
+	maxIconUpload = 256 << 10
+)
+
+// PATCH /api/feeds/{id} {"title": "..."}: your own name for the feed; empty resets it.
+func (s *Server) renameFeed(w http.ResponseWriter, r *http.Request, uid int64) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "expected JSON body {\"title\": ...}")
+		return
+	}
+	title := strings.TrimSpace(body.Title)
+	if len([]rune(title)) > maxFeedName {
+		writeError(w, http.StatusBadRequest, "name must be at most 100 characters")
+		return
+	}
+	s.finish(w, s.store.RenameFeed(r.Context(), uid, id, title))
+}
+
+// PUT /api/feeds/{id}/icon: the body is the image itself (png, jpeg, gif, webp, ico or svg).
+func (s *Server) uploadFeedIcon(w http.ResponseWriter, r *http.Request, uid int64) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxIconUpload))
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "image must be under 256KB")
+		return
+	}
+	ct := uploadType(data, r.Header.Get("Content-Type"))
+	if ct == "" {
+		writeError(w, http.StatusUnsupportedMediaType, "that isn't a PNG, JPEG, GIF, WebP, ICO or SVG image")
+		return
+	}
+	s.finish(w, s.store.SetCustomIcon(r.Context(), uid, id, data, ct))
+}
+
+// uploadType decides what an uploaded file is from its bytes, not from what the
+// client claims. SVG has no signature to sniff, so it must say so and look like one.
+func uploadType(data []byte, declared string) string {
+	ct := http.DetectContentType(data)
+	switch {
+	case strings.HasPrefix(ct, "image/"):
+		return ct
+	case strings.HasPrefix(declared, "image/svg+xml") && bytes.Contains(bytes.ToLower(data[:min(len(data), 2048)]), []byte("<svg")):
+		return "image/svg+xml"
+	}
+	return ""
+}
+
+// finish answers 204, 404 for an unknown feed, or 500.
+func (s *Server) finish(w http.ResponseWriter, err error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "no such feed")
 		return
 	}
 	if err != nil {
